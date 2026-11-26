@@ -1,6 +1,7 @@
 use crate::logging::log_warn;
 use std::ffi::c_void;
 use std::mem::size_of;
+use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{COLORREF, GetLastError, HWND, POINT, RECT, SIZE};
 use windows::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
@@ -12,7 +13,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 /// Persistent RAII top-down 32-bit premultiplied BGRA DIB surface for `UpdateLayeredWindowIndirect`.
-/// Zero per-frame GDI allocations; restores old bitmap and releases DC + HBITMAP on drop.
+/// Zero per-frame GDI allocations; swizzles ONLY dirty pixels on static-geometry partial updates.
 pub struct LayeredSurface {
     hdc: HDC,
     hbitmap: HBITMAP,
@@ -20,6 +21,7 @@ pub struct LayeredSurface {
     bits: *mut u8,
     width: u32,
     height: u32,
+    last_err_log: Option<Instant>,
 }
 
 impl LayeredSurface {
@@ -63,6 +65,7 @@ impl LayeredSurface {
                 bits: bits as *mut u8,
                 width: w,
                 height: h,
+                last_err_log: None,
             })
         }
     }
@@ -75,37 +78,86 @@ impl LayeredSurface {
         Ok(true)
     }
 
-    /// Copy-swizzle premultiplied RGBA8 (`tiny-skia`) into premultiplied BGRA8 DIB,
-    /// snapping faint shadow pixels (`alpha < 8`) to exact `0` so unlocked native `alpha == 0`
-    /// click pass-through has zero invisible click-traps, then present via `UpdateLayeredWindowIndirect`.
+    /// Copy-swizzle premultiplied RGBA8 (`tiny-skia`) into premultiplied BGRA8 DIB ONLY inside
+    /// `dirty_rect` (when static geometry) or full buffer (on full-frame commits), snapping faint
+    /// shadow pixels (`alpha < 8`) to exact `0` for native click pass-through, then present via
+    /// `UpdateLayeredWindowIndirect`.
     pub fn present_rgba(
         &mut self,
         hwnd: HWND,
         pt_dst: Option<POINT>,
+        update_size: bool,
         rgba_premul: &[u8],
         opacity: f32,
         dirty_rect: Option<RECT>,
     ) -> bool {
-        let expected = (self.width as usize) * (self.height as usize) * 4;
+        let w = self.width as usize;
+        let h = self.height as usize;
+        let expected = w * h * 4;
         if rgba_premul.len() != expected {
             return false;
         }
+
+        // Only use partial dirty-rect swizzle & `prcDirty` when window position/size are unchanged!
+        let clamped_dirty = if pt_dst.is_none() && !update_size {
+            dirty_rect.map(|r| {
+                let left = r.left.clamp(0, self.width as i32);
+                let top = r.top.clamp(0, self.height as i32);
+                let right = r.right.clamp(left, self.width as i32);
+                let bottom = r.bottom.clamp(top, self.height as i32);
+                RECT {
+                    left,
+                    top,
+                    right,
+                    bottom,
+                }
+            })
+        } else {
+            None
+        };
+
+        let (x0, y0, x1, y1) = if let Some(r) = clamped_dirty {
+            if r.right <= r.left || r.bottom <= r.top {
+                return true; // Nothing dirty to present
+            }
+            (
+                r.left as usize,
+                r.top as usize,
+                r.right as usize,
+                r.bottom as usize,
+            )
+        } else {
+            (0, 0, w, h)
+        };
+
         unsafe {
             let dst_slice = std::slice::from_raw_parts_mut(self.bits, expected);
-            // Auto-vectorizable RGBA -> BGRA swizzle with alpha < 8 fringe snap
-            for (dst, src) in dst_slice.chunks_exact_mut(4).zip(rgba_premul.chunks_exact(4)) {
-                let a = src[3];
-                if a < 8 {
-                    dst[0] = 0;
-                    dst[1] = 0;
-                    dst[2] = 0;
-                    dst[3] = 0;
-                } else {
-                    // Enforce premultiplied invariant (R,G,B <= A) to prevent DWM neon halos
-                    dst[0] = src[2].min(a);
-                    dst[1] = src[1].min(a);
-                    dst[2] = src[0].min(a);
-                    dst[3] = a;
+            let stride = w * 4;
+            let row_start = x0 * 4;
+            let row_end = x1 * 4;
+            for y in y0..y1 {
+                let base = y * stride;
+                let dst_row = &mut dst_slice[base + row_start..base + row_end];
+                let src_row = &rgba_premul[base + row_start..base + row_end];
+                for (dst, src) in dst_row
+                    .as_chunks_mut::<4>()
+                    .0
+                    .iter_mut()
+                    .zip(src_row.as_chunks::<4>().0.iter())
+                {
+                    let a = src[3];
+                    if a < 8 {
+                        dst[0] = 0;
+                        dst[1] = 0;
+                        dst[2] = 0;
+                        dst[3] = 0;
+                    } else {
+                        // Enforce premultiplied invariant (R,G,B <= A) to prevent DWM neon halos
+                        dst[0] = src[2].min(a);
+                        dst[1] = src[1].min(a);
+                        dst[2] = src[0].min(a);
+                        dst[3] = a;
+                    }
                 }
             }
 
@@ -125,7 +177,12 @@ impl LayeredSurface {
                 .as_ref()
                 .map(|p| p as *const POINT)
                 .unwrap_or(std::ptr::null());
-            let dirty_ptr = dirty_rect
+            let size_ptr = if update_size {
+                &size as *const SIZE
+            } else {
+                std::ptr::null()
+            };
+            let dirty_ptr = clamped_dirty
                 .as_ref()
                 .map(|r| r as *const RECT)
                 .unwrap_or(std::ptr::null());
@@ -134,7 +191,7 @@ impl LayeredSurface {
                 cbSize: size_of::<UPDATELAYEREDWINDOWINFO>() as u32,
                 hdcDst: HDC::default(),
                 pptDst: dst_ptr,
-                psize: &size,
+                psize: size_ptr,
                 hdcSrc: self.hdc,
                 pptSrc: &pt_src,
                 crKey: COLORREF(0),
@@ -144,10 +201,17 @@ impl LayeredSurface {
             };
 
             if !UpdateLayeredWindowIndirect(hwnd, &info).as_bool() {
-                log_warn(
-                    "surface",
-                    &format!("UpdateLayeredWindowIndirect failed: {:?}", GetLastError()),
-                );
+                let should_log = self
+                    .last_err_log
+                    .map(|t| t.elapsed() >= Duration::from_secs(5))
+                    .unwrap_or(true);
+                if should_log {
+                    self.last_err_log = Some(Instant::now());
+                    log_warn(
+                        "surface",
+                        &format!("UpdateLayeredWindowIndirect failed: {:?}", GetLastError()),
+                    );
+                }
                 return false;
             }
             true

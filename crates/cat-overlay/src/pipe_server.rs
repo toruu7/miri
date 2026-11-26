@@ -75,6 +75,7 @@ fn current_user_sddl() -> Result<String, String> {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 pub enum PipeEvent {
     Message(DesignerToOverlay),
     Disconnected,

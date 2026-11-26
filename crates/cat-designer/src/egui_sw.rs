@@ -91,7 +91,7 @@ impl EguiSoftwareRasterizer {
     }
 
     pub fn clear(&mut self, r: u8, g: u8, b: u8) {
-        for px in self.bgra.chunks_exact_mut(4) {
+        for px in self.bgra.as_chunks_mut::<4>().0 {
             px[0] = b;
             px[1] = g;
             px[2] = r;
@@ -137,7 +137,7 @@ impl EguiSoftwareRasterizer {
         let tex = self.textures.get(&mesh.texture_id);
         let fb_w = self.width;
 
-        for tri in mesh.indices.chunks_exact(3) {
+        for tri in mesh.indices.as_chunks::<3>().0 {
             let v0 = mesh.vertices[tri[0] as usize];
             let v1 = mesh.vertices[tri[1] as usize];
             let v2 = mesh.vertices[tri[2] as usize];

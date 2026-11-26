@@ -35,6 +35,7 @@ pub enum DesignerToOverlay {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum OverlayToDesigner {
     HelloAck {
         protocol_version: u32,
@@ -53,8 +54,9 @@ pub enum OverlayToDesigner {
 }
 
 /// Strictly redacted diagnostic snapshot (zero keycodes, zero characters, zero window titles,
-/// zero file paths). Safe to copy to clipboard or inspect in `cat-designer`.
+/// zero file paths, zero privacy pulse counts). Safe to copy to clipboard or inspect in `cat-designer`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DiagnosticsSnapshot {
     pub app_version: String,
     pub pacing_stage: String,
@@ -74,6 +76,10 @@ pub struct DiagnosticsSnapshot {
     pub dt_clamped_count: u64,
     pub gdi_objects: u32,
     pub working_set_kb: u64,
+    pub render_avg_us: u32,
+    pub dirty_rect_avg_pct: u8,
+    pub sprite_cache_rebuilds: u64,
+    pub spring_nan_resets: u64,
     pub hotkey_conflicts: Vec<String>,
     pub last_config_error: Option<String>,
     pub last_ipc_error: Option<String>,
@@ -133,5 +139,17 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn diagnostics_v1_backward_compat_defaults() {
+        // Older diagnostics JSON without new perf fields must deserialize cleanly.
+        let legacy_json = r#"{"app_version":"0.1.0","pacing_stage":"Parked0","target_fps":0}"#;
+        let snap: DiagnosticsSnapshot = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(snap.app_version, "0.1.0");
+        assert_eq!(snap.render_avg_us, 0);
+        assert_eq!(snap.dirty_rect_avg_pct, 0);
+        assert_eq!(snap.sprite_cache_rebuilds, 0);
+        assert_eq!(snap.spring_nan_resets, 0);
     }
 }

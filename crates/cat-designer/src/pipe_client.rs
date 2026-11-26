@@ -22,6 +22,7 @@ use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
 
 pub const WM_APP_IPC_EVENT: u32 = WM_APP + 20;
 
+#[allow(clippy::large_enum_variant)]
 pub enum ClientEvent {
     Message(OverlayToDesigner),
     Disconnected,

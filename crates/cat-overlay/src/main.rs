@@ -20,7 +20,8 @@ use pet_core::config::{anchor_to_work_area_pos, work_area_pos_to_norm};
 use pet_core::{
     builtin_presets, clamp_rect_to_work_area, resolve_profile, BackdropMode, CatProfile,
     DesignerToOverlay, DiagnosticsSnapshot, OverlayToDesigner, PacingStage, PetSim, PoseOverride,
-    RectI32, Vec2, BASE_CANVAS_H, BASE_CANVAS_W, MAX_CANVAS_EDGE_PX, PROTOCOL_VERSION,
+    PrivacySource, RectI32, Vec2, BASE_CANVAS_H, BASE_CANVAS_W, MAX_CANVAS_EDGE_PX, MAX_SIM_DT,
+    PROTOCOL_VERSION,
 };
 use pet_render::{RenderOptions, Renderer};
 use pipe_server::{PipeEvent, PipeSession};
@@ -343,6 +344,7 @@ fn main() {
     surface.present_rgba(
         overlay_hwnd,
         Some(POINT { x: win_x, y: win_y }),
+        true,
         renderer.rgba_bytes(),
         store.config.opacity,
         None,
@@ -366,6 +368,11 @@ fn main() {
     let mut dt_clamped_count: u64 = 0;
     let mut events_per_sec: u32 = 0;
     let mut pipe_nonce: u64 = 1;
+    let mut force_full_present = false;
+    let mut force_immediate_frame = false;
+    let mut was_in_head = false;
+    let mut render_avg_us: f64 = 0.0;
+    let mut dirty_pct_avg: f64 = 100.0;
 
     let wait_handles = [frame_timer, input_wake_ev, config_wake_ev, ipc_wake_ev];
 
@@ -436,6 +443,8 @@ fn main() {
                 win_x = suggested.left;
                 win_y = suggested.top;
             }
+            force_full_present = true;
+            force_immediate_frame = true;
             sim.mark_dirty();
         }
 
@@ -455,6 +464,8 @@ fn main() {
                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
                 );
             }
+            force_full_present = true;
+            force_immediate_frame = true;
             sim.mark_dirty();
         }
 
@@ -463,17 +474,35 @@ fn main() {
         }
         if let Some(locked) = actions.session_locked {
             sim.set_session_locked(locked);
+            if !locked {
+                force_full_present = true;
+                force_immediate_frame = true;
+            }
         }
         if let Some(off) = actions.display_off {
             sim.set_display_off(off);
+            if !off {
+                force_full_present = true;
+                force_immediate_frame = true;
+            }
         }
         if actions.pointer_left {
+            was_in_head = false;
             sim.on_pointer_leave();
         }
         if let Some((hx, hy)) = actions.hover_point_px {
-            let inside = HEAD_RECT_PX.with(|r| r.borrow().contains(hx, hy));
+            // Bug #6 fix: stable neutral head envelope + 10 px exit hysteresis eliminates boundary chatter
+            let inside = HEAD_RECT_PX.with(|r| {
+                let rect = *r.borrow();
+                if was_in_head {
+                    rect.contains_expanded(hx, hy, 10.0)
+                } else {
+                    rect.contains(hx, hy)
+                }
+            });
+            was_in_head = inside;
             let hx_dip = hx * 96.0 / dpi as f32;
-            sim.on_head_hover_dip(inside, hx_dip, &store.config);
+            let _ = sim.on_head_hover_dip(inside, hx_dip, &store.config);
         }
 
         let mut trigger_open_designer = actions.open_designer;
@@ -494,6 +523,8 @@ fn main() {
             win_x = cx;
             win_y = cy;
             let _ = store.save_config();
+            force_full_present = true;
+            force_immediate_frame = true;
             sim.wake_active();
             trigger_open_designer = true;
         }
@@ -505,6 +536,11 @@ fn main() {
         }
         if actions.toggle_privacy {
             sim.toggle_manual_privacy();
+            mailbox.set_privacy_state(
+                sim.is_privacy_active(),
+                sim.privacy_source() == PrivacySource::Manual,
+            );
+            force_immediate_frame = true;
             update_tray_status(&shell, &store.config, &sim);
         }
         if actions.open_context_menu {
@@ -520,6 +556,11 @@ fn main() {
                 }
                 CMD_TOGGLE_PRIVACY => {
                     sim.toggle_manual_privacy();
+                    mailbox.set_privacy_state(
+                        sim.is_privacy_active(),
+                        sim.privacy_source() == PrivacySource::Manual,
+                    );
+                    force_immediate_frame = true;
                 }
                 CMD_TOGGLE_SHOWCASE => {
                     store.config.showcase_mode = !store.config.showcase_mode;
@@ -561,11 +602,14 @@ fn main() {
                     win_x = nx;
                     win_y = ny;
                     let _ = store.save_config();
+                    force_full_present = true;
+                    force_immediate_frame = true;
                     sim.wake_active();
                 }
                 CMD_COPY_DIAG => {
                     let diag = build_diagnostics(
                         &sim,
+                        &renderer,
                         &store,
                         on_battery,
                         dpi,
@@ -577,6 +621,8 @@ fn main() {
                         events_per_sec,
                         uipi_stale_releases,
                         dt_clamped_count,
+                        render_avg_us.round() as u32,
+                        dirty_pct_avg.round().clamp(0.0, 100.0) as u8,
                         &hotkey_conflicts,
                         pipe_session.as_ref(),
                     );
@@ -657,23 +703,23 @@ fn main() {
         }
 
         // Hot-reload `config.json` (150 ms debounced + hash-deduplicated)
-        if config_watcher.poll_debounced_ready() {
-            if store.reload_config_with_recovery() {
-                store.reload_user_profiles();
-                active_profile =
-                    resolve_profile(&store.config.active_profile_id, &store.user_profiles);
-                apply_click_through_style(overlay_hwnd, store.config.effective_click_through());
-                hotkey_conflicts = shell.register_hotkeys(&store.config.hotkeys);
-                let (nw, nh) = compute_canvas_px(store.config.scale, dpi);
-                if nw != cw || nh != ch {
-                    cw = nw;
-                    ch = nh;
-                    renderer.resize(cw, ch);
-                    let _ = surface.resize_if_needed(cw, ch);
-                }
-                reconcile_autostart(store.config.auto_start);
-                sim.wake_active();
+        if config_watcher.poll_debounced_ready() && store.reload_config_with_recovery() {
+            store.reload_user_profiles();
+            active_profile =
+                resolve_profile(&store.config.active_profile_id, &store.user_profiles);
+            apply_click_through_style(overlay_hwnd, store.config.effective_click_through());
+            hotkey_conflicts = shell.register_hotkeys(&store.config.hotkeys);
+            let (nw, nh) = compute_canvas_px(store.config.scale, dpi);
+            if nw != cw || nh != ch {
+                cw = nw;
+                ch = nh;
+                renderer.resize(cw, ch);
+                let _ = surface.resize_if_needed(cw, ch);
             }
+            reconcile_autostart(store.config.auto_start);
+            force_full_present = true;
+            force_immediate_frame = true;
+            sim.wake_active();
         }
 
         // Drain Named Pipe IPC messages from `cat-designer.exe`
@@ -688,6 +734,7 @@ fn main() {
                         DesignerToOverlay::Hello { .. } => {
                             let diag = build_diagnostics(
                                 &sim,
+                                &renderer,
                                 &store,
                                 on_battery,
                                 dpi,
@@ -699,6 +746,8 @@ fn main() {
                                 events_per_sec,
                                 uipi_stale_releases,
                                 dt_clamped_count,
+                                render_avg_us.round() as u32,
+                                dirty_pct_avg.round().clamp(0.0, 100.0) as u8,
                                 &hotkey_conflicts,
                                 Some(session),
                             );
@@ -717,11 +766,15 @@ fn main() {
                         } => {
                             preview_override = Some(profile_draft);
                             sim.set_pose_override(pose_override);
+                            force_full_present = true;
+                            force_immediate_frame = true;
                             sim.wake_active();
                         }
                         DesignerToOverlay::CancelPreview => {
                             preview_override = None;
                             sim.set_pose_override(PoseOverride::Auto);
+                            force_full_present = true;
+                            force_immediate_frame = true;
                             sim.wake_active();
                         }
                         DesignerToOverlay::CommitProfile {
@@ -795,11 +848,14 @@ fn main() {
                             }
                             let _ = store.save_config();
                             GLOBAL_FG_DIRTY.store(true, Ordering::Release);
+                            force_full_present = true;
+                            force_immediate_frame = true;
                             sim.wake_active();
                         }
                         DesignerToOverlay::RequestDiagnostics => {
                             let diag = build_diagnostics(
                                 &sim,
+                                &renderer,
                                 &store,
                                 on_battery,
                                 dpi,
@@ -811,6 +867,8 @@ fn main() {
                                 events_per_sec,
                                 uipi_stale_releases,
                                 dt_clamped_count,
+                                render_avg_us.round() as u32,
+                                dirty_pct_avg.round().clamp(0.0, 100.0) as u8,
                                 &hotkey_conflicts,
                                 Some(session),
                             );
@@ -839,6 +897,10 @@ fn main() {
             let eval = evaluate_foreground(overlay_hwnd, capture_stage.is_some(), &store.config);
             fullscreen_reason = eval.fullscreen_reason;
             sim.set_auto_privacy(eval.auto_privacy);
+            mailbox.set_privacy_state(
+                sim.is_privacy_active(),
+                sim.privacy_source() == PrivacySource::Manual,
+            );
 
             if eval.foreground_elevated_or_inaccessible && sim.has_any_key_held() {
                 sim.release_all_keys();
@@ -856,6 +918,8 @@ fn main() {
                 overlay_visible = true;
                 raw_worker.set_enabled(true);
                 sim.set_game_hidden(false);
+                force_full_present = true;
+                force_immediate_frame = true;
                 unsafe {
                     let _ = ShowWindow(overlay_hwnd, SW_SHOWNOACTIVATE);
                 }
@@ -875,6 +939,9 @@ fn main() {
         // Drain coalesced Raw Input (only when visible or Capture Stage active)
         if overlay_visible || capture_stage.is_some() {
             let drained = mailbox.drain();
+            if drained.privacy_activity {
+                sim.on_privacy_activity();
+            }
             for (k, down) in drained.keys {
                 sim.on_key_event(k, down, &store.config);
             }
@@ -882,14 +949,18 @@ fn main() {
                 || drained.mouse_dy != 0
                 || drained.wheel_delta != 0
                 || drained.left_btn.is_some()
+                || drained.left_clicked
                 || drained.right_btn.is_some()
+                || drained.right_clicked
             {
                 let gaze = compute_cursor_gaze(overlay_hwnd);
                 sim.on_mouse_input(
                     drained.mouse_dx,
                     drained.mouse_dy,
                     drained.left_btn,
+                    drained.left_clicked,
                     drained.right_btn,
+                    drained.right_clicked,
                     drained.wheel_delta,
                     gaze,
                 );
@@ -901,15 +972,20 @@ fn main() {
             }
         }
 
-        // Step simulation & render on QPC deadline
+        // Step simulation & render on QPC deadline (Bug #6 fix: never let passive hover bypass pacing!)
         let now_qpc = qpc_now();
         let stage = sim.pacing();
         let period_ms = stage.period_ms(on_battery);
-        let should_step = sim.is_dirty() || period_ms.is_some() && now_qpc >= next_deadline_qpc;
+        let should_step = if period_ms.is_some() {
+            now_qpc >= next_deadline_qpc || force_immediate_frame
+        } else {
+            sim.is_dirty() || force_immediate_frame
+        };
 
         if should_step && (overlay_visible || capture_stage.is_some()) {
+            force_immediate_frame = false;
             let raw_dt = ((now_qpc - last_step_qpc).max(0) as f64 / freq) as f32;
-            if raw_dt > 0.05 {
+            if raw_dt > MAX_SIM_DT {
                 dt_clamped_count += 1;
             }
             last_step_qpc = now_qpc;
@@ -919,6 +995,7 @@ fn main() {
             let snap = sim.snapshot();
 
             if overlay_visible {
+                let t0 = qpc_now();
                 let hb = renderer.render(
                     display_profile,
                     &snap,
@@ -929,20 +1006,57 @@ fn main() {
                             && display_profile.peripherals.show_keycap_legends,
                     },
                 );
-                HEAD_RECT_PX.with(|h| *h.borrow_mut() = hb.head_rect_px);
-                let dirty_r = RECT {
-                    left: hb.dirty_rect_px.x.floor().max(0.0) as i32,
-                    top: hb.dirty_rect_px.y.floor().max(0.0) as i32,
-                    right: hb.dirty_rect_px.w.ceil().min(cw as f32) as i32,
-                    bottom: hb.dirty_rect_px.h.ceil().min(ch as f32) as i32,
+                let render_us = ((qpc_now() - t0).max(0) as f64 / freq) * 1_000_000.0;
+                render_avg_us = if render_avg_us <= 0.1 {
+                    render_us
+                } else {
+                    render_avg_us * 0.90 + render_us * 0.10
                 };
-                surface.present_rgba(
-                    overlay_hwnd,
-                    Some(POINT { x: win_x, y: win_y }),
-                    renderer.rgba_bytes(),
-                    store.config.opacity,
-                    Some(dirty_r),
-                );
+
+                HEAD_RECT_PX.with(|h| *h.borrow_mut() = hb.head_rect_px);
+
+                // Bug #1 fix: RECT.right = x + w, RECT.bottom = y + h (NOT w and h!)
+                let left = hb.dirty_rect_px.x.floor().clamp(0.0, cw as f32) as i32;
+                let top = hb.dirty_rect_px.y.floor().clamp(0.0, ch as f32) as i32;
+                let right = (hb.dirty_rect_px.x + hb.dirty_rect_px.w)
+                    .ceil()
+                    .clamp(left as f32, cw as f32) as i32;
+                let bottom = (hb.dirty_rect_px.y + hb.dirty_rect_px.h)
+                    .ceil()
+                    .clamp(top as f32, ch as f32) as i32;
+                let dirty_r = RECT {
+                    left,
+                    top,
+                    right,
+                    bottom,
+                };
+                let dirty_area = ((right - left).max(0) as f64) * ((bottom - top).max(0) as f64);
+                let total_area = (cw as f64 * ch as f64).max(1.0);
+                let pct = (dirty_area / total_area) * 100.0;
+                dirty_pct_avg = dirty_pct_avg * 0.90 + pct * 0.10;
+
+                let is_full_dirty = force_full_present
+                    || (left == 0 && top == 0 && right == cw as i32 && bottom == ch as i32);
+                let ok = if is_full_dirty {
+                    surface.present_rgba(
+                        overlay_hwnd,
+                        Some(POINT { x: win_x, y: win_y }),
+                        true,
+                        renderer.rgba_bytes(),
+                        store.config.opacity,
+                        None,
+                    )
+                } else {
+                    surface.present_rgba(
+                        overlay_hwnd,
+                        None,
+                        false,
+                        renderer.rgba_bytes(),
+                        store.config.opacity,
+                        Some(dirty_r),
+                    )
+                };
+                force_full_present = !ok;
             }
 
             if let Some(ref mut stage_win) = capture_stage {
@@ -1145,6 +1259,7 @@ fn update_tray_status(shell: &HelperShell, cfg: &pet_core::Config, sim: &PetSim)
 #[allow(clippy::too_many_arguments)]
 fn build_diagnostics(
     sim: &PetSim,
+    renderer: &Renderer,
     store: &ConfigStore,
     on_battery: bool,
     dpi: u32,
@@ -1156,6 +1271,8 @@ fn build_diagnostics(
     raw_input_events_sec: u32,
     uipi_stale_releases: u64,
     dt_clamped_count: u64,
+    render_avg_us: u32,
+    dirty_rect_avg_pct: u8,
     hotkey_conflicts: &[String],
     pipe: Option<&PipeSession>,
 ) -> DiagnosticsSnapshot {
@@ -1177,6 +1294,10 @@ fn build_diagnostics(
         dt_clamped_count,
         gdi_objects: gdi,
         working_set_kb: ws_kb,
+        render_avg_us,
+        dirty_rect_avg_pct,
+        sprite_cache_rebuilds: renderer.cache_rebuilds(),
+        spring_nan_resets: sim.spring_nan_resets(),
         hotkey_conflicts: hotkey_conflicts.to_vec(),
         last_config_error: store.last_error.clone(),
         last_ipc_error: pipe.and_then(|p| p.last_error.lock().ok().and_then(|e| e.clone())),

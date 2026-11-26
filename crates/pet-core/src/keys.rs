@@ -130,6 +130,7 @@ pub struct KeyCapSpec {
 
 const TOTAL_U: f32 = 16.0;
 
+#[allow(clippy::too_many_arguments)]
 const fn make_spec(
     key: PhysicalKey,
     row: u8,

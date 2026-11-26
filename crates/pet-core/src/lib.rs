@@ -19,9 +19,10 @@ pub use keys::{
     KEYCAP_COUNT,
 };
 pub use rig::{
-    keyboard_local_to_world, mouse_world_pos, project_25d, FrameHitboxes, HitRect, Vec2, Vec3,
-    BASE_CANVAS_H, BASE_CANVAS_W, HEADROOM_RATIO,
+    keyboard_local_to_world, mouse_paw_palm_world, mouse_world_pos, project_25d, FrameHitboxes,
+    HitRect, RigAnchors, Vec2, Vec3, BASE_CANVAS_H, BASE_CANVAS_W, HEADROOM_RATIO,
 };
 pub use sim::{
-    FloatingPopup, PacingStage, PetSim, PoseOverride, PrivacySource, SimSnapshot, SleepParticle,
+    ExpressionState, FloatingPopup, PacingStage, PetSim, PoseOverride, PostureMode, PrivacySource,
+    SimSnapshot, SleepParticle, Spring1D, MAX_SIM_DT,
 };

@@ -419,8 +419,8 @@ unsafe fn create_cat_tray_icon() -> HICON {
                 let dx = x as f32 - 7.5;
                 let dy = y as f32 - 9.5;
                 let in_head = (dx * dx) / 36.0 + (dy * dy) / 22.0 <= 1.0;
-                let in_l_ear = y >= 2 && y <= 7 && x >= 2 && x <= 5 && (x - 2) <= (y - 2);
-                let in_r_ear = y >= 2 && y <= 7 && x >= 10 && x <= 13 && (13 - x) <= (y - 2);
+                let in_l_ear = (2..=7).contains(&y) && (2..=5).contains(&x) && (x - 2) <= (y - 2);
+                let in_r_ear = (2..=7).contains(&y) && (10..=13).contains(&x) && (13 - x) <= (y - 2);
                 if in_head || in_l_ear || in_r_ear {
                     set(px, x, y, 22, 22, 28, 255);
                 }

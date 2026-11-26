@@ -228,33 +228,23 @@ pub fn new_user_profile_id() -> String {
     )
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BackdropMode {
+    #[default]
     Transparent,
     Solid(Rgb8),
 }
 
-impl Default for BackdropMode {
-    fn default() -> Self {
-        Self::Transparent
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GameHideScope {
+    #[default]
     SameMonitor,
     AnyMonitor,
     Disabled,
     #[serde(other)]
     Unknown,
-}
-
-impl Default for GameHideScope {
-    fn default() -> Self {
-        Self::SameMonitor
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

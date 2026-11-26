@@ -30,20 +30,29 @@ pub struct DrainedInput {
     pub mouse_dy: i32,
     pub wheel_delta: i16,
     pub left_btn: Option<bool>,
+    pub left_clicked: bool,
     pub right_btn: Option<bool>,
+    pub right_clicked: bool,
     pub keys: Vec<(PhysicalKey, bool)>,
+    /// Anonymous key activity flag emitted ONLY in Manual Privacy Mode (zero `PhysicalKey` crosses boundary).
+    pub privacy_activity: bool,
 }
 
 /// Lock-free mailbox between the `HWND_MESSAGE` Raw Input thread and the UI frame loop.
-/// Handles 4-8 kHz gaming mice with zero `PostMessageW` storms while awake, and wakes `PARKED_0`
-/// instantaneously using a `SeqCst` handshake against `overlay_parked`.
+/// Handles 4-8 kHz gaming mice with zero `PostMessageW` storms while awake, preserves sub-frame
+/// clicks via atomic edge-latching, enforces key-identity stripping at the input-thread boundary
+/// during Privacy Mode, and wakes `PARKED_0` instantaneously using a `SeqCst` handshake.
 pub struct InputMailbox {
     mouse_dx: AtomicI32,
     mouse_dy: AtomicI32,
     mouse_wheel: AtomicI32,
-    mouse_left_bits: AtomicU32,  // bit 0 = down seen, bit 1 = up seen, bit 2 = last state
+    // bit 0 (0b001) = DOWN edge latched, bit 1 (0b010) = UP edge latched, bit 2 (0b100) = latest held state
+    mouse_left_bits: AtomicU32,
     mouse_right_bits: AtomicU32,
     key_ring: Mutex<VecDeque<(PhysicalKey, bool)>>,
+    privacy_active: AtomicBool,
+    privacy_allow_lease: AtomicBool,
+    privacy_activity_flag: AtomicBool,
     pub input_seq: AtomicU64,
     pub overlay_parked: AtomicBool,
     pub events_counter: AtomicU32,
@@ -60,11 +69,29 @@ impl InputMailbox {
             mouse_left_bits: AtomicU32::new(0),
             mouse_right_bits: AtomicU32::new(0),
             key_ring: Mutex::new(VecDeque::with_capacity(64)),
+            privacy_active: AtomicBool::new(false),
+            privacy_allow_lease: AtomicBool::new(false),
+            privacy_activity_flag: AtomicBool::new(false),
             input_seq: AtomicU64::new(0),
             overlay_parked: AtomicBool::new(false),
             events_counter: AtomicU32::new(0),
             registered: AtomicBool::new(false),
             wake_event_raw: wake_event.0 as isize,
+        }
+    }
+
+    /// Update input-thread privacy boundary enforcement. When `active` is true, key identities
+    /// are dropped BEFORE scancode mapping on the Raw Input thread; `allow_lease` is true ONLY
+    /// in Manual Privacy Mode (`CredentialHeuristic` auto-privacy stays strictly silent at 0 wakeups).
+    pub fn set_privacy_state(&self, active: bool, allow_lease: bool) {
+        self.privacy_active.store(active, Ordering::Release);
+        self.privacy_allow_lease
+            .store(active && allow_lease, Ordering::Release);
+        if active {
+            if let Ok(mut q) = self.key_ring.lock() {
+                q.clear();
+            }
+            self.privacy_activity_flag.store(false, Ordering::Release);
         }
     }
 
@@ -88,6 +115,24 @@ impl InputMailbox {
         self.signal_if_parked();
     }
 
+    fn push_privacy_activity(&self) {
+        self.privacy_activity_flag.store(true, Ordering::Release);
+        self.events_counter.fetch_add(1, Ordering::Relaxed);
+        self.signal_if_parked();
+    }
+
+    /// Bug #2 fix: atomic edge-latching preserves sub-frame DOWN+UP taps (`< 1` frame duration)
+    /// so fast mouse clicks never get overwritten by the subsequent UP flag before `drain()`.
+    fn latch_button(slot: &AtomicU32, down: bool) {
+        let _ = slot.try_update(Ordering::AcqRel, Ordering::Acquire, |old| {
+            if down {
+                Some(old | 0b101)
+            } else {
+                Some((old | 0b010) & !0b100)
+            }
+        });
+    }
+
     fn push_mouse(&self, dx: i32, dy: i32, flags: u16, wheel: i16) {
         if dx != 0 {
             self.mouse_dx.fetch_add(dx, Ordering::Relaxed);
@@ -99,14 +144,16 @@ impl InputMailbox {
             self.mouse_wheel.fetch_add(wheel as i32, Ordering::Relaxed);
         }
         if (flags & RI_MOUSE_LEFT_BUTTON_DOWN as u16) != 0 {
-            self.mouse_left_bits.store(0b101, Ordering::Relaxed);
-        } else if (flags & RI_MOUSE_LEFT_BUTTON_UP as u16) != 0 {
-            self.mouse_left_bits.store(0b010, Ordering::Relaxed);
+            Self::latch_button(&self.mouse_left_bits, true);
+        }
+        if (flags & RI_MOUSE_LEFT_BUTTON_UP as u16) != 0 {
+            Self::latch_button(&self.mouse_left_bits, false);
         }
         if (flags & RI_MOUSE_RIGHT_BUTTON_DOWN as u16) != 0 {
-            self.mouse_right_bits.store(0b101, Ordering::Relaxed);
-        } else if (flags & RI_MOUSE_RIGHT_BUTTON_UP as u16) != 0 {
-            self.mouse_right_bits.store(0b010, Ordering::Relaxed);
+            Self::latch_button(&self.mouse_right_bits, true);
+        }
+        if (flags & RI_MOUSE_RIGHT_BUTTON_UP as u16) != 0 {
+            Self::latch_button(&self.mouse_right_bits, false);
         }
         self.events_counter.fetch_add(1, Ordering::Relaxed);
         self.signal_if_parked();
@@ -115,20 +162,28 @@ impl InputMailbox {
     pub fn drain(&self) -> DrainedInput {
         let mouse_dx = self.mouse_dx.swap(0, Ordering::Relaxed);
         let mouse_dy = self.mouse_dy.swap(0, Ordering::Relaxed);
-        let wheel = self.mouse_wheel.swap(0, Ordering::Relaxed).clamp(-32000, 32000) as i16;
+        let wheel = self
+            .mouse_wheel
+            .swap(0, Ordering::Relaxed)
+            .clamp(-32000, 32000) as i16;
 
-        let lbits = self.mouse_left_bits.swap(0, Ordering::Relaxed);
+        let lbits = self.mouse_left_bits.swap(0, Ordering::AcqRel);
         let left_btn = if lbits == 0 {
             None
         } else {
             Some((lbits & 0b100) != 0)
         };
-        let rbits = self.mouse_right_bits.swap(0, Ordering::Relaxed);
+        let left_clicked = (lbits & 0b001) != 0;
+
+        let rbits = self.mouse_right_bits.swap(0, Ordering::AcqRel);
         let right_btn = if rbits == 0 {
             None
         } else {
             Some((rbits & 0b100) != 0)
         };
+        let right_clicked = (rbits & 0b001) != 0;
+
+        let privacy_activity = self.privacy_activity_flag.swap(false, Ordering::AcqRel);
 
         let mut keys = Vec::new();
         if let Ok(mut q) = self.key_ring.lock() {
@@ -140,8 +195,11 @@ impl InputMailbox {
             mouse_dy,
             wheel_delta: wheel,
             left_btn,
+            left_clicked,
             right_btn,
+            right_clicked,
             keys,
+            privacy_activity,
         }
     }
 }
@@ -270,7 +328,10 @@ fn run_raw_input_loop(mailbox: Arc<InputMailbox>, hwnd_out: Arc<AtomicIsize>) {
         ) {
             Ok(h) => h,
             Err(e) => {
-                log_warn("raw_input", &format!("CreateWindowExW HWND_MESSAGE failed: {e}"));
+                log_warn(
+                    "raw_input",
+                    &format!("CreateWindowExW HWND_MESSAGE failed: {e}"),
+                );
                 return;
             }
         };
@@ -292,16 +353,30 @@ fn run_raw_input_loop(mailbox: Arc<InputMailbox>, hwnd_out: Arc<AtomicIsize>) {
 
 fn process_raw_packet(raw: &RAWINPUT, mailbox: &InputMailbox) {
     let dw_type = raw.header.dwType;
+    let in_privacy = mailbox.privacy_active.load(Ordering::Acquire);
+
     if dw_type == RIM_TYPEKEYBOARD.0 {
         let kb = unsafe { raw.data.keyboard };
         let flags = kb.Flags as u32;
         let is_break = (flags & RI_KEY_BREAK) != 0;
+
+        if in_privacy {
+            // Strip key identity immediately at thread boundary (scancode never mapped or queued!).
+            if !is_break && mailbox.privacy_allow_lease.load(Ordering::Acquire) {
+                mailbox.push_privacy_activity();
+            }
+            return;
+        }
+
         let e0 = (flags & RI_KEY_E0) != 0;
         let e1 = (flags & RI_KEY_E1) != 0;
         if let Some(pk) = from_windows_scancode(kb.MakeCode, e0, e1) {
             mailbox.push_key(pk, !is_break);
         }
     } else if dw_type == RIM_TYPEMOUSE.0 {
+        if in_privacy {
+            return;
+        }
         let m = unsafe { raw.data.mouse };
         let (btn_flags, btn_data) = unsafe {
             (
@@ -323,7 +398,6 @@ unsafe extern "system" fn raw_input_wndproc(
         WM_INPUT => {
             let mailbox = WORKER_MAILBOX.lock().ok().and_then(|g| g.clone());
             if let Some(mb) = mailbox {
-                // First read triggering message cleanly via GetRawInputData
                 let mut raw = RAWINPUT::default();
                 let mut size = size_of::<RAWINPUT>() as u32;
                 let res = GetRawInputData(
@@ -337,8 +411,8 @@ unsafe extern "system" fn raw_input_wndproc(
                     process_raw_packet(&raw, &mb);
                 }
 
-                // Batch-drain any queued 4-8 kHz packets in one syscall via 8-byte aligned GetRawInputBuffer
-                let mut buf = [0u64; 512]; // 4096 bytes, guaranteed 8-byte aligned
+                // Batch-drain queued 4-8 kHz packets via 8-byte aligned GetRawInputBuffer
+                let mut buf = [0u64; 512];
                 let mut cb = (buf.len() * size_of::<u64>()) as u32;
                 let count = GetRawInputBuffer(
                     Some(buf.as_mut_ptr() as *mut RAWINPUT),
@@ -359,7 +433,6 @@ unsafe extern "system" fn raw_input_wndproc(
                             break;
                         }
                         process_raw_packet(pkt, &mb);
-                        // NEXTRAWINPUTBLOCK 8-byte x64 alignment
                         offset = (offset + pkt_size + 7) & !7;
                     }
                 }

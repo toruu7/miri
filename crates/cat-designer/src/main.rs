@@ -281,7 +281,7 @@ fn main() {
         }
 
         // Step local embedded `pet-render` preview
-        let dt = last_tick.elapsed().as_secs_f32().min(0.05);
+        let dt = last_tick.elapsed().as_secs_f32().min(pet_core::MAX_SIM_DT);
         last_tick = Instant::now();
         preview_sim.set_pose_override(pose_override);
         preview_sim.step(dt);
@@ -616,6 +616,7 @@ fn main() {
                         ui.label(format!("Pacing Stage: {} ({} FPS, battery={})", diagnostics.pacing_stage, diagnostics.target_fps, diagnostics.on_battery));
                         ui.label(format!("Canvas: {}x{} px @ {} DPI", diagnostics.canvas_w_px, diagnostics.canvas_h_px, diagnostics.dpi));
                         ui.label(format!("Overlay Working Set: {:.1} MB | GDI Objects: {}", diagnostics.working_set_kb as f32 / 1024.0, diagnostics.gdi_objects));
+                        ui.label(format!("Render Avg: {} us | Dirty Rect Avg: {}% | Cache Rebuilds: {} | Spring Resets: {}", diagnostics.render_avg_us, diagnostics.dirty_rect_avg_pct, diagnostics.sprite_cache_rebuilds, diagnostics.spring_nan_resets));
                         ui.label(format!("Raw Input Registered: {} ({} ev/s) | UIPI Stale Releases: {}", diagnostics.raw_input_registered, diagnostics.raw_input_events_sec, diagnostics.uipi_stale_releases));
                         ui.label(format!("Privacy Source: {} | Fullscreen Suppressed: {} ({})", diagnostics.privacy_source, diagnostics.fullscreen_suppressed, diagnostics.fullscreen_reason));
                         if !diagnostics.hotkey_conflicts.is_empty() {
@@ -701,7 +702,7 @@ fn rgb_row(ui: &mut egui::Ui, label: &str, rgb: &mut Rgb8) -> bool {
 
 fn premul_rgba_to_color_image(w: usize, h: usize, rgba: &[u8]) -> ColorImage {
     let mut pixels = Vec::with_capacity(w * h);
-    for px in rgba.chunks_exact(4) {
+    for px in rgba.as_chunks::<4>().0 {
         pixels.push(Color32::from_rgba_premultiplied(px[0], px[1], px[2], px[3]));
     }
     ColorImage {

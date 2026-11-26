@@ -44,6 +44,7 @@ pub fn draw_text_centered(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn seg(pb: &mut PathBuilder, ox: f32, oy: f32, w: f32, h: f32, x0: f32, y0: f32, x1: f32, y1: f32) {
     pb.move_to(ox + x0 * w, oy + y0 * h);
     pb.line_to(ox + x1 * w, oy + y1 * h);
