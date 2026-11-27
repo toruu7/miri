@@ -72,7 +72,8 @@ pub fn draw_cat_body_and_head(
     let torso_path = build_torso_path(torso_c, s, breath, sim.sleep_t);
     let (head_local_path, ear_l_inner, ear_r_inner) = build_head_and_ears_local(
         s,
-        sim.ear_relax,
+        sim.ear_relax_l,
+        sim.ear_relax_r,
         sim.ear_twitch_l,
         sim.ear_twitch_r,
     );
@@ -100,13 +101,15 @@ pub fn draw_cat_body_and_head(
     bbox.include_circle(foot_l, 18.0 * s);
     bbox.include_circle(foot_r, 18.0 * s);
 
-    // 1. Exterior ink silhouette under-stroke for crisp unified illustrated contour
-    let out_w = optical_stroke(3.0, s);
-    if let Some(ref tp) = torso_path {
-        stroke_path(pixmap, tp, pal.outline, out_w, aa);
-    }
-    if let Some(ref hp) = head_local_path {
-        stroke_path_xf(pixmap, hp, pal.outline, out_w, head_mat, None, aa);
+    // 1. Crisp exterior contour (omitted on dark coats for LittleOne's clean matte silhouette)
+    if !pal.is_dark_coat {
+        let out_w = optical_stroke(1.8, s);
+        if let Some(ref tp) = torso_path {
+            stroke_path(pixmap, tp, pal.outline, out_w, aa);
+        }
+        if let Some(ref hp) = head_local_path {
+            stroke_path_xf(pixmap, hp, pal.outline, out_w, head_mat, None, aa);
+        }
     }
 
     // 2. Base coat fills
@@ -137,27 +140,58 @@ pub fn draw_cat_body_and_head(
         draw_clipped_coat_markings(pixmap, mask, app, torso_c, head_mat, s, aa);
     }
 
-    // 5. Crisp cel-shading volume bands (lower-right torso crescent, soft chin cast shadow,
-    //    lower cheek shadow, and gentle crown rim highlight) clipped cleanly inside the body mask!
+    // 5. Soft minimal cel-shading volume bands clipped cleanly inside the body mask
     draw_cel_body_shading(pixmap, mask, pal, torso_c, head_c, head_mat, s, aa);
 
-    // 6. Tucked back paws with cel shading and delicate toe-notch marks
+    // 6. Subtle tucked back paws
     draw_back_paws(pixmap, app, pal, foot_l, foot_r, s, aa);
 
-    // 7. Inner ear triangles (follow `head_mat` cleanly!)
-    let inner_col = rgb_color(app.inner_ear_color, 1.0);
-    let inner_sh = rgb_color(app.inner_ear_color.scale(0.80), 0.72);
+    // 7. Inner ear triangles (very subtle on dark coats so black cat reads as clean matte silhouette)
+    let inner_alpha = if pal.is_dark_coat { 0.30 } else { 0.92 };
+    let inner_col = rgb_color(app.inner_ear_color, inner_alpha);
     if let Some(ref el) = ear_l_inner {
         fill_path_xf(pixmap, el, inner_col, head_mat, None, aa);
-        stroke_path_xf(pixmap, el, inner_sh, optical_stroke(0.95, s), head_mat, None, aa);
     }
     if let Some(ref er) = ear_r_inner {
         fill_path_xf(pixmap, er, inner_col, head_mat, None, aa);
-        stroke_path_xf(pixmap, er, inner_sh, optical_stroke(0.95, s), head_mat, None, aa);
     }
 
     // 8. Expressive face drawn 100% through `head_xf` (zero shear under tilt/squash!)
     draw_face(pixmap, app, pal, sim, head_xf, s, aa);
+
+    // 8b. Minimalist tactile contact feedback at the exact scratched spot (works even when click-through locked!)
+    if sim.scratch_intensity > 0.02 {
+        if let Some(spot) = sim.scratch_spot {
+            let sx = spot.x.clamp(-1.0, 1.0) * 34.0 * s;
+            let sy = spot.y.clamp(-1.0, 1.0) * 28.0 * s;
+            let pulse = 0.5 + 0.5 * sim.purr_phase.sin();
+            let alpha = sim.scratch_intensity.clamp(0.0, 1.0);
+            let glow_r = (8.5 + pulse * 3.0) * s;
+            if let Some(glow) = ellipse_path(sx, sy, glow_r, glow_r * 0.85) {
+                let mut g_col = pal.blush;
+                g_col.set_alpha(0.26 * alpha);
+                fill_path_xf(pixmap, &glow, g_col, head_mat, None, aa);
+            }
+            let ring_r = (6.0 + pulse * 7.5) * s;
+            if let Some(ring) = ellipse_path(sx, sy, ring_r, ring_r * 0.85) {
+                let ring_col = if pal.is_dark_coat {
+                    Color::from_rgba(0.95, 0.96, 0.90, 0.36 * alpha * (1.0 - pulse * 0.45)).unwrap()
+                } else {
+                    Color::from_rgba(0.94, 0.52, 0.66, 0.40 * alpha * (1.0 - pulse * 0.45)).unwrap()
+                };
+                stroke_path_xf(
+                    pixmap,
+                    &ring,
+                    ring_col,
+                    optical_stroke(1.1, s),
+                    head_mat,
+                    None,
+                    aa,
+                );
+            }
+            bbox.include_circle(Vec2::new(head_c.x + sx, head_c.y + sy), ring_r + 6.0 * s);
+        }
+    }
 
     // 9. Stable neutral head hitbox (Bug #6 fix: anchored to neutral head center so vertical
     //    `head_squash` during rubbing never pushes the head out from under the pointer!)
@@ -240,11 +274,15 @@ pub fn draw_arms_and_paws(
             }
         }
 
-        // Cozy organic elbow curve (gentle outward+downward plush bend when reaching to mouse!)
+        // Smooth continuous forearm curve (zero binary elbow-drop or side-bow snapping!)
         let reach_dx = (paw.x - shoulder.x).abs() / s.max(0.1);
-        let elbow_drop = if reach_dx > 40.0 { 7.5 * s } else { -1.5 * s };
+        let reach_u = ((reach_dx - 16.0) / 36.0).clamp(0.0, 1.0);
+        let reach_smooth = reach_u * reach_u * (3.0 - 2.0 * reach_u);
+        let elbow_drop = (-1.0 + reach_smooth * 7.0) * s;
+        let idle_blend = (sim.floor_rest_t * (1.0 - reach_smooth)).clamp(0.0, 1.0);
+        let side_bow = side * (6.5 - idle_blend * 3.5) * s;
         let mid = Vec2::new(
-            (shoulder.x + paw.x) * 0.5 + side * 8.5 * s,
+            (shoulder.x + paw.x) * 0.5 + side_bow,
             (shoulder.y + paw.y) * 0.5 + elbow_drop,
         );
 
@@ -254,12 +292,12 @@ pub fn draw_arms_and_paws(
         for i in 0..N {
             let t = i as f32 / (N - 1) as f32;
             spine[i] = eval_quad(shoulder, mid, paw, t);
-            // Smooth plush organic forearm taper: sturdy shoulder -> soft wrist (never thin stick!)
-            half_w[i] = (9.0 - t * 1.9) * s;
+            // Slender tubular LittleOne limbs tapering softly toward rounded paw tip
+            half_w[i] = (7.1 - t * 1.4) * s;
             bbox.include_circle(spine[i], half_w[i] + 6.0 * s);
         }
 
-        // Outer silhouette edge starts near shoulder (idx 1), inner chest-fold edge starts lower (idx 3)
+        // Subtle interior contour lines separating limbs cleanly on dark coats
         let (l_start, r_start) = if side < 0.0 { (3, 1) } else { (1, 3) };
         let rib = build_tapered_ribbon(&spine, &half_w, l_start, r_start, side > 0.0);
         if let Some(ref body) = rib.body {
@@ -269,8 +307,7 @@ pub fn draw_arms_and_paws(
             fill_path(pixmap, sh, pal.cel_shadow_overlay, aa);
         }
 
-        // Open side-only exterior contour + dark-coat silver separation rim (NO round shoulder cap!)
-        let edge_w = optical_stroke(1.45, s);
+        let edge_w = optical_stroke(1.0, s);
         let edge_col = if pal.is_dark_coat {
             pal.rim_sep
         } else {
@@ -283,11 +320,11 @@ pub fn draw_arms_and_paws(
             stroke_path(pixmap, re, edge_col, edge_w, aa);
         }
 
-        // Sculpted front paw pad (subtle squash-and-stretch on strike/floor rest + mouse roll!)
-        let paw_sx = 1.0 + strike * 0.10 + sim.floor_rest_t * 0.08;
-        let paw_sy = 1.0 - strike * 0.08 - sim.floor_rest_t * 0.06;
-        let paw_rx = 9.4 * s * paw_sx;
-        let paw_ry = 7.4 * s * paw_sy;
+        // Smooth rounded stubby paw tip (no chunky toe-line claws!)
+        let paw_sx = 1.0 + strike * 0.08 + sim.floor_rest_t * 0.05;
+        let paw_sy = 1.0 - strike * 0.06 - sim.floor_rest_t * 0.05;
+        let paw_rx = 6.6 * s * paw_sx;
+        let paw_ry = 5.4 * s * paw_sy;
         let paw_col = match app.marking_pattern {
             MarkingPattern::Tuxedo
             | MarkingPattern::Bicolor
@@ -298,38 +335,23 @@ pub fn draw_arms_and_paws(
         let paw_xf = Transform::from_rotate(paw_roll.to_degrees()).post_translate(paw.x, paw.y);
         if let Some(paw_ball) = ellipse_path(0.0, 0.0, paw_rx, paw_ry) {
             fill_path_xf(pixmap, &paw_ball, paw_col, paw_xf, None, aa);
-            // Subtle lower paw underside shadow
-            if let Some(p_sh) = ellipse_path(0.0, paw_ry * 0.32, paw_rx * 0.82, paw_ry * 0.45) {
-                fill_path_xf(
-                    pixmap,
-                    &p_sh,
-                    Color::from_rgba(0.04, 0.05, 0.10, 0.16).unwrap(),
-                    paw_xf,
-                    None,
-                    aa,
-                );
-            }
-            stroke_path_xf(
-                pixmap,
-                &paw_ball,
-                edge_col,
-                optical_stroke(1.2, s),
-                paw_xf,
-                None,
-                aa,
+            // Stroke only the lower/front paw arc so the forearm flows seamlessly into the paw tip (no wrist seam ring)
+            let mut arc = PathBuilder::new();
+            arc.move_to(-paw_rx * 0.94, paw_ry * 0.05);
+            arc.cubic_to(
+                -paw_rx * 0.86,
+                paw_ry * 1.12,
+                paw_rx * 0.86,
+                paw_ry * 1.12,
+                paw_rx * 0.94,
+                paw_ry * 0.05,
             );
-            // Two tiny curved toe-separation ticks on front paw tip
-            let mut tpb = PathBuilder::new();
-            for tx in [-2.6f32, 2.6] {
-                tpb.move_to(tx * s, paw_ry * 0.25);
-                tpb.line_to(tx * s, paw_ry * 0.88);
-            }
-            if let Some(tp) = tpb.finish() {
+            if let Some(ap) = arc.finish() {
                 stroke_path_xf(
                     pixmap,
-                    &tp,
+                    &ap,
                     edge_col,
-                    optical_stroke(0.9, s),
+                    optical_stroke(0.95, s),
                     paw_xf,
                     None,
                     aa,
@@ -376,64 +398,72 @@ fn draw_cel_body_shading(
         );
     }
 
-    // 2. Soft curved highlight hugging the upper-left flank silhouette
-    let mut lhi = PathBuilder::new();
-    lhi.move_to(torso_c.x - 30.0 * s, torso_c.y - 24.0 * s);
-    lhi.quad_to(
-        torso_c.x - 42.0 * s,
-        torso_c.y + 2.0 * s,
-        torso_c.x - 36.0 * s,
-        torso_c.y + 24.0 * s,
-    );
-    if let Some(hp) = lhi.finish() {
-        stroke_path_xf(
-            pixmap,
-            &hp,
-            pal.cel_highlight_overlay,
-            optical_stroke(4.5, s),
-            Transform::identity(),
-            Some(mask),
-            aa,
+    // 2. Soft curved highlight hugging the upper-left flank silhouette (light coats only)
+    if !pal.is_dark_coat {
+        let mut lhi = PathBuilder::new();
+        lhi.move_to(torso_c.x - 24.0 * s, torso_c.y - 22.0 * s);
+        lhi.quad_to(
+            torso_c.x - 34.0 * s,
+            torso_c.y + 2.0 * s,
+            torso_c.x - 30.0 * s,
+            torso_c.y + 22.0 * s,
         );
+        if let Some(hp) = lhi.finish() {
+            stroke_path_xf(
+                pixmap,
+                &hp,
+                pal.cel_highlight_overlay,
+                optical_stroke(3.6, s),
+                Transform::identity(),
+                Some(mask),
+                aa,
+            );
+        }
     }
 
-    // 3. Soft tight contact shadow tucked directly beneath the chin curve
-    if let Some(chin_ao) = ellipse_path(head_c.x + 1.0 * s, head_c.y + 32.5 * s, 26.0 * s, 5.5 * s) {
-        fill_path_xf(
-            pixmap,
-            &chin_ao,
-            pal.contact_ao,
-            Transform::identity(),
-            Some(mask),
-            aa,
-        );
+    // 3. Soft tight contact shadow tucked directly beneath the chin curve (light coats only)
+    if !pal.is_dark_coat {
+        if let Some(chin_ao) =
+            ellipse_path(head_c.x + 1.0 * s, head_c.y + 26.5 * s, 21.0 * s, 4.2 * s)
+        {
+            fill_path_xf(
+                pixmap,
+                &chin_ao,
+                pal.contact_ao,
+                Transform::identity(),
+                Some(mask),
+                aa,
+            );
+        }
     }
 
-    // 4. Tight rim cel shadow hugging ONLY the outer right cheek & lower chin (never cuts across ears!)
+    // 4. Tight rim cel shadow hugging outer right cheek & lower chin
     let mut hsh = PathBuilder::new();
-    hsh.move_to(41.0 * s, -12.0 * s);
-    hsh.cubic_to(42.0 * s, 14.0 * s, 26.0 * s, 32.0 * s, -22.0 * s, 34.0 * s);
-    hsh.line_to(58.0 * s, 48.0 * s);
-    hsh.line_to(58.0 * s, -18.0 * s);
+    hsh.move_to(35.0 * s, -10.0 * s);
+    hsh.cubic_to(36.0 * s, 12.0 * s, 22.0 * s, 27.0 * s, -18.0 * s, 29.0 * s);
+    hsh.line_to(50.0 * s, 42.0 * s);
+    hsh.line_to(50.0 * s, -16.0 * s);
     hsh.close();
     if let Some(p) = hsh.finish() {
         fill_path_xf(pixmap, &p, pal.cel_shadow_overlay, head_mat, Some(mask), aa);
     }
 
-    // 5. Delicate curved crown highlight hugging upper-left head contour (never a solid floating blob!)
-    let mut crown = PathBuilder::new();
-    crown.move_to(-22.0 * s, -31.0 * s);
-    crown.quad_to(-6.0 * s, -35.5 * s, 10.0 * s, -33.5 * s);
-    if let Some(cp) = crown.finish() {
-        stroke_path_xf(
-            pixmap,
-            &cp,
-            pal.cel_highlight_overlay,
-            optical_stroke(3.8, s),
-            head_mat,
-            Some(mask),
-            aa,
-        );
+    // 5. Delicate curved crown highlight (light coats only; dark coats stay pure matte velvet)
+    if !pal.is_dark_coat {
+        let mut crown = PathBuilder::new();
+        crown.move_to(-18.0 * s, -26.0 * s);
+        crown.quad_to(-5.0 * s, -30.0 * s, 8.0 * s, -28.0 * s);
+        if let Some(cp) = crown.finish() {
+            stroke_path_xf(
+                pixmap,
+                &cp,
+                pal.cel_highlight_overlay,
+                optical_stroke(3.2, s),
+                head_mat,
+                Some(mask),
+                aa,
+            );
+        }
     }
 }
 
@@ -460,25 +490,13 @@ fn draw_back_paws(
     };
 
     for &fp in &[foot_l, foot_r] {
-        // Subtle contact AO underneath back paw
-        if let Some(ao) = ellipse_path(fp.x, fp.y + 4.5 * s, 13.5 * s, 5.2 * s) {
-            fill_path(pixmap, &ao, Color::from_rgba(0.03, 0.04, 0.08, 0.22).unwrap(), aa);
-        }
-        if let Some(p) = ellipse_path(fp.x, fp.y, 13.2 * s, 9.6 * s) {
+        if let Some(p) = ellipse_path(fp.x, fp.y, 7.6 * s, 5.4 * s) {
             fill_path(pixmap, &p, foot_col, aa);
-            if let Some(sh) = ellipse_path(fp.x, fp.y + 3.0 * s, 10.6 * s, 4.6 * s) {
-                fill_path(pixmap, &sh, Color::from_rgba(0.04, 0.05, 0.10, 0.16).unwrap(), aa);
+            let mut soft_edge = edge_col;
+            if pal.is_dark_coat {
+                soft_edge.set_alpha(soft_edge.alpha() * 0.45);
             }
-            stroke_path(pixmap, &p, edge_col, optical_stroke(1.25, s), aa);
-            // Tiny subtle toe notch
-            let mut tpb = PathBuilder::new();
-            tpb.move_to(fp.x - 2.8 * s, fp.y + 3.2 * s);
-            tpb.line_to(fp.x - 2.8 * s, fp.y + 8.6 * s);
-            tpb.move_to(fp.x + 2.8 * s, fp.y + 3.2 * s);
-            tpb.line_to(fp.x + 2.8 * s, fp.y + 8.6 * s);
-            if let Some(tp) = tpb.finish() {
-                stroke_path(pixmap, &tp, edge_col, optical_stroke(0.9, s), aa);
-            }
+            stroke_path(pixmap, &p, soft_edge, optical_stroke(0.85, s), aa);
         }
     }
 }
@@ -657,27 +675,27 @@ fn draw_clipped_coat_markings(
 }
 
 fn build_torso_path(c: Vec2, s: f32, breath: f32, sleep_t: f32) -> Option<Path> {
-    // Cozy rounded pear silhouette proportioned harmoniously beneath the head
-    let w_top = (34.5 + breath * 0.45) * s;
-    let w_bot = (54.0 + sleep_t * 6.5 + breath * 0.85) * s;
-    let h_top = (-36.0 + sleep_t * 8.0) * s;
+    // Sleek upright pear-shaped seated silhouette matching LittleOne (~60% keyboard width)
+    let w_top = (28.5 + breath * 0.40) * s;
+    let w_bot = (43.5 + sleep_t * 5.5 + breath * 0.70) * s;
+    let h_top = (-35.0 + sleep_t * 7.5) * s;
     let h_bot = 46.0 * s;
 
     let mut pb = PathBuilder::new();
     pb.move_to(c.x - w_top, c.y + h_top);
     pb.cubic_to(
-        c.x - w_bot * 0.94,
+        c.x - w_bot * 0.90,
         c.y - 2.0 * s,
         c.x - w_bot,
         c.y + h_bot * 0.86,
         c.x - w_bot * 0.50,
         c.y + h_bot,
     );
-    pb.quad_to(c.x, c.y + h_bot + 2.5 * s, c.x + w_bot * 0.56, c.y + h_bot);
+    pb.quad_to(c.x, c.y + h_bot + 2.0 * s, c.x + w_bot * 0.54, c.y + h_bot);
     pb.cubic_to(
-        c.x + w_bot * 1.08,
+        c.x + w_bot * 1.04,
         c.y + h_bot * 0.84,
-        c.x + w_bot * 0.96,
+        c.x + w_bot * 0.92,
         c.y - 4.0 * s,
         c.x + w_top * 0.94,
         c.y + h_top,
@@ -686,59 +704,60 @@ fn build_torso_path(c: Vec2, s: f32, breath: f32, sleep_t: f32) -> Option<Path> 
     pb.finish()
 }
 
-/// Build head + expressive ears in head-local coordinates centered at `(0, 0)`.
+/// Build compact rounded head + cute medium-small softly rounded ears in head-local space.
 fn build_head_and_ears_local(
     s: f32,
-    ear_relax: f32,
+    ear_relax_l: f32,
+    ear_relax_r: f32,
     ear_twitch_l: f32,
     ear_twitch_r: f32,
 ) -> (Option<Path>, Option<Path>, Option<Path>) {
-    let rx = 47.5 * s;
-    let ry = 37.5 * s;
+    let rx = 39.5 * s;
+    let ry = 31.5 * s;
 
-    let l_relax = (ear_relax + ear_twitch_l * 0.45).clamp(-0.35, 1.15);
-    let r_relax = (ear_relax + ear_twitch_r * 0.45).clamp(-0.35, 1.15);
-    let lx_off = l_relax * 8.5 * s;
-    let ly_off = l_relax * 7.5 * s;
-    let rx_off = r_relax * 8.5 * s;
-    let ry_off = r_relax * 7.5 * s;
+    let l_relax = (ear_relax_l + ear_twitch_l * 0.45).clamp(-0.35, 1.25);
+    let r_relax = (ear_relax_r + ear_twitch_r * 0.45).clamp(-0.35, 1.25);
+    let lx_off = l_relax * 7.0 * s;
+    let ly_off = l_relax * 6.0 * s;
+    let rx_off = r_relax * 7.0 * s;
+    let ry_off = r_relax * 6.0 * s;
 
-    let l_base_out = Vec2::new(-rx * 0.82, -ry * 0.34);
-    let l_tip = Vec2::new(-rx * 0.74 - lx_off, -ry * 1.56 + ly_off);
-    let l_base_in = Vec2::new(-rx * 0.16, -ry * 0.94);
+    let l_base_out = Vec2::new(-rx * 0.82, -ry * 0.30);
+    let l_tip = Vec2::new(-rx * 0.72 - lx_off, -ry * 1.44 + ly_off);
+    let l_base_in = Vec2::new(-rx * 0.18, -ry * 0.92);
 
-    let r_base_in = Vec2::new(rx * 0.16, -ry * 0.94);
-    let r_tip = Vec2::new(rx * 0.74 + rx_off, -ry * 1.56 + ry_off);
-    let r_base_out = Vec2::new(rx * 0.82, -ry * 0.34);
+    let r_base_in = Vec2::new(rx * 0.18, -ry * 0.92);
+    let r_tip = Vec2::new(rx * 0.72 + rx_off, -ry * 1.44 + ry_off);
+    let r_base_out = Vec2::new(rx * 0.82, -ry * 0.30);
 
-    let cheek_r = Vec2::new(rx * 1.05, ry * 0.18);
+    let cheek_r = Vec2::new(rx * 1.06, ry * 0.18);
     let chin = Vec2::new(0.0, ry * 1.02);
-    let cheek_l = Vec2::new(-rx * 1.05, ry * 0.18);
+    let cheek_l = Vec2::new(-rx * 1.06, ry * 0.18);
 
     let mut pb = PathBuilder::new();
     pb.move_to(l_base_out.x, l_base_out.y);
     pb.quad_to(
-        -rx * 0.90 - lx_off * 0.5,
-        -ry * 1.12 + ly_off * 0.5,
+        -rx * 0.88 - lx_off * 0.48,
+        -ry * 1.06 + ly_off * 0.48,
         l_tip.x,
         l_tip.y,
     );
     pb.quad_to(
         -rx * 0.42 - lx_off * 0.15,
-        -ry * 1.38 + ly_off * 0.42,
+        -ry * 1.32 + ly_off * 0.40,
         l_base_in.x,
         l_base_in.y,
     );
-    pb.quad_to(0.0, -ry * 1.04, r_base_in.x, r_base_in.y);
+    pb.quad_to(0.0, -ry * 1.02, r_base_in.x, r_base_in.y);
     pb.quad_to(
         rx * 0.42 + rx_off * 0.15,
-        -ry * 1.38 + ry_off * 0.42,
+        -ry * 1.32 + ry_off * 0.40,
         r_tip.x,
         r_tip.y,
     );
     pb.quad_to(
-        rx * 0.90 + rx_off * 0.5,
-        -ry * 1.12 + ry_off * 0.5,
+        rx * 0.88 + rx_off * 0.48,
+        -ry * 1.06 + ry_off * 0.48,
         r_base_out.x,
         r_base_out.y,
     );
@@ -762,14 +781,14 @@ fn build_head_and_ears_local(
 
     // Rounded soft inner-ear triangles
     let inner_ear = |side: f32, x_off: f32, y_off: f32| -> Option<Path> {
-        let a = Vec2::new(side * rx * 0.66 + side * x_off * 0.72, -ry * 1.32 + y_off * 0.75);
-        let b = Vec2::new(side * rx * 0.70, -ry * 0.66);
-        let d = Vec2::new(side * rx * 0.28, -ry * 0.90);
+        let a = Vec2::new(side * rx * 0.64 + side * x_off * 0.70, -ry * 1.24 + y_off * 0.72);
+        let b = Vec2::new(side * rx * 0.68, -ry * 0.64);
+        let d = Vec2::new(side * rx * 0.30, -ry * 0.88);
         let mut eb = PathBuilder::new();
         eb.move_to(a.x, a.y);
-        eb.quad_to(side * rx * 0.74 + side * x_off * 0.25, -ry * 0.98 + y_off * 0.3, b.x, b.y);
-        eb.quad_to(side * rx * 0.48, -ry * 0.76, d.x, d.y);
-        eb.quad_to(side * rx * 0.44 + side * x_off * 0.3, -ry * 1.14 + y_off * 0.4, a.x, a.y);
+        eb.quad_to(side * rx * 0.72 + side * x_off * 0.25, -ry * 0.94 + y_off * 0.3, b.x, b.y);
+        eb.quad_to(side * rx * 0.48, -ry * 0.74, d.x, d.y);
+        eb.quad_to(side * rx * 0.44 + side * x_off * 0.3, -ry * 1.08 + y_off * 0.4, a.x, a.y);
         eb.close();
         eb.finish()
     };

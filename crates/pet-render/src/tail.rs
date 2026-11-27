@@ -25,20 +25,20 @@ pub fn draw_tail_back(
     let sway = sim.tail_sway_phase.sin() * sway_amp;
     let sway2 = (sim.tail_sway_phase - 0.95).sin() * sway_amp * 0.9;
 
-    // Graceful upright S-hook cat tail emerging smoothly from right hip
-    let p0 = project_25d(Vec3::new(34.0, 28.0, -14.0), wf, hf);
+    // Compact slender J-hook cat tail emerging smoothly from lower-right hip (LittleOne proportions)
+    let p0 = project_25d(Vec3::new(26.0, 36.0, -14.0), wf, hf);
     let c1 = project_25d(
-        Vec3::new(78.0 + curl * 18.0, 36.0 + sway * 0.35 + curl * 22.0, -10.0),
+        Vec3::new(56.0 + curl * 18.0, 42.0 + sway * 0.35 + curl * 20.0, -10.0),
         wf,
         hf,
     );
     let c2 = project_25d(
-        Vec3::new(92.0 - curl * 10.0, -2.0 + sway + curl * 58.0, -6.0),
+        Vec3::new(66.0 - curl * 8.0, 22.0 + sway + curl * 48.0, -6.0),
         wf,
         hf,
     );
     let tip = project_25d(
-        Vec3::new(112.0 + curl * 24.0, -22.0 + sway2 * 1.15 + curl * 96.0, 6.0),
+        Vec3::new(82.0 + curl * 22.0, 10.0 + sway2 * 1.1 + curl * 72.0, 4.0),
         wf,
         hf,
     );
@@ -49,15 +49,17 @@ pub fn draw_tail_back(
     for i in 0..N {
         let t = i as f32 / (N - 1) as f32;
         spine[i] = eval_cubic(p0, c1, c2, tip, t);
-        // Plush organic cat-tail silhouette: sturdy base -> fuller plume -> soft rounded tip
-        let plume = 1.0 + (t * std::f32::consts::PI).sin() * 0.26 - t * 0.08;
-        half_w[i] = 7.6 * s * plume;
-        bbox.include_circle(spine[i], half_w[i] + 10.0 * s);
+        // Slender softly tapered cat tail with rounded tip
+        let taper = 1.0 + (t * std::f32::consts::PI).sin() * 0.14 - t * 0.18;
+        half_w[i] = 5.4 * s * taper;
+        bbox.include_circle(spine[i], half_w[i] + 8.0 * s);
     }
 
     let rib = build_tapered_ribbon(&spine, &half_w, 1, 1, true);
     if let Some(ref body) = rib.body {
-        stroke_path(pixmap, body, pal.outline, optical_stroke(2.7, s), aa);
+        if !pal.is_dark_coat {
+            stroke_path(pixmap, body, pal.outline, optical_stroke(1.6, s), aa);
+        }
         fill_path(pixmap, body, rgb_color(pal.tail_fill, 1.0), aa);
     }
 
@@ -85,12 +87,10 @@ pub fn draw_tail_back(
         fill_path(pixmap, sh, pal.cel_shadow_overlay, aa);
     }
 
-    // Subtle rim highlight along upper silhouette
+    // Subtle rim highlight along upper silhouette (omit bright grey stripe on dark coats for clean matte silhouette)
     if let Some(ref top_edge) = rib.left_edge {
-        if pal.is_dark_coat {
-            stroke_path(pixmap, top_edge, pal.rim_sep, optical_stroke(1.25, s), aa);
-        } else {
-            stroke_path(pixmap, top_edge, pal.cel_highlight_overlay, optical_stroke(1.4, s), aa);
+        if !pal.is_dark_coat {
+            stroke_path(pixmap, top_edge, pal.cel_highlight_overlay, optical_stroke(1.2, s), aa);
         }
     }
 }

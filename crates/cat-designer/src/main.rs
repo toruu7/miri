@@ -382,10 +382,14 @@ fn main() {
                         if ui.button(save_lbl).clicked() {
                             let mut to_save = draft.clone();
                             if to_save.is_builtin() {
+                                let orig_name = builtin_presets()
+                                    .into_iter()
+                                    .find(|p| p.id == to_save.id)
+                                    .map(|p| p.name);
                                 to_save.base_preset_id = Some(to_save.id.clone());
                                 to_save.id = new_user_profile_id();
-                                if to_save.name == draft.name {
-                                    to_save.name = format!("{} Custom", draft.name);
+                                if orig_name.as_deref() == Some(to_save.name.as_str()) {
+                                    to_save.name = format!("{} Custom", to_save.name);
                                 }
                             }
                             to_save.sanitize();
@@ -408,12 +412,15 @@ fn main() {
                                 status_banner = Some("Saved draft offline to AppData.".to_string());
                             }
                         }
-                        if dirty_draft && ui.button("Revert").clicked() {
-                            draft = resolve_profile(&config.active_profile_id, &user_profiles);
-                            dirty_draft = false;
-                            if let Some(ref c) = pipe_client {
-                                c.send(&DesignerToOverlay::CancelPreview);
+                        if dirty_draft {
+                            if ui.button("Revert").clicked() {
+                                draft = resolve_profile(&config.active_profile_id, &user_profiles);
+                                dirty_draft = false;
+                                if let Some(ref c) = pipe_client {
+                                    c.send(&DesignerToOverlay::CancelPreview);
+                                }
                             }
+                            ui.colored_label(Color32::from_rgb(245, 195, 90), "Unsaved");
                         }
                     });
                 });
@@ -558,7 +565,7 @@ fn main() {
                             }
                         });
                         c_changed |= ui.add(egui::Slider::new(&mut config.opacity, 0.15..=1.0).text("Opacity")).changed();
-                        c_changed |= ui.checkbox(&mut config.click_through_locked, "Click-Through Lock (disables dragging & head patting)").changed();
+                        c_changed |= ui.checkbox(&mut config.click_through_locked, "Click-Through Lock (passes clicks through; hover head-scratching stays active)").changed();
                         c_changed |= ui.checkbox(&mut config.auto_start, "Auto-Start on Windows Login").changed();
 
                         ui.separator();
@@ -695,7 +702,29 @@ fn rgb_row(ui: &mut egui::Ui, label: &str, rgb: &mut Rgb8) -> bool {
             rgb.b = arr[2];
             changed = true;
         }
-        ui.label(format!("{label} ({})", rgb.to_hex_string()));
+        let hex_id = ui.make_persistent_id(label);
+        let mut hex_buf = ui.data_mut(|d| {
+            d.get_temp::<String>(hex_id)
+                .unwrap_or_else(|| rgb.to_hex_string())
+        });
+        let resp = ui.add(
+            egui::TextEdit::singleline(&mut hex_buf)
+                .desired_width(68.0)
+                .char_limit(7),
+        );
+        if resp.changed() {
+            let trimmed = hex_buf.trim().trim_start_matches('#');
+            if trimmed.len() == 6 {
+                if let Ok(val) = u32::from_str_radix(trimmed, 16) {
+                    *rgb = Rgb8::from_hex(val);
+                    changed = true;
+                }
+            }
+            ui.data_mut(|d| d.insert_temp(hex_id, hex_buf));
+        } else if !resp.has_focus() {
+            ui.data_mut(|d| d.insert_temp(hex_id, rgb.to_hex_string()));
+        }
+        ui.label(label);
     });
     changed
 }

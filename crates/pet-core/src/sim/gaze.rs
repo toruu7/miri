@@ -26,7 +26,8 @@ pub struct GazeController {
 impl Default for GazeController {
     fn default() -> Self {
         Self {
-            eye_gaze: Spring2D::new(Vec2::default(), 16.0, 0.86, 0.004, 0.02),
+            // Fast eye saccades (omega=26) lead the heavier head follow-through (omega~12)
+            eye_gaze: Spring2D::new(Vec2::default(), 26.0, 0.88, 0.004, 0.02),
             cursor_gaze: Vec2::default(),
             kb_gaze: Vec2::new(0.0, 0.56),
             typing_gaze_hold_sec: 0.0,
@@ -55,12 +56,12 @@ impl GazeController {
         if let Some(g) = cursor_norm {
             self.cursor_gaze = Vec2::new(g.x.clamp(-1.0, 1.0), g.y.clamp(-1.0, 1.0));
         }
-        self.mouse_gaze_hold_sec = 1.6;
+        self.mouse_gaze_hold_sec = 3.6;
         if clicked_or_scrolled {
             self.mouse_action_glance_sec = 0.45;
         }
         self.idle_look_target = Vec2::default();
-        self.idle_look_timer = 3.4;
+        self.idle_look_timer = 4.2;
     }
 
     pub fn is_active(&self) -> bool {

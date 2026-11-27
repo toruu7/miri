@@ -54,27 +54,28 @@ impl CelPalette {
             base_rgb.scale(0.34).lerp(Rgb8::new(18, 20, 32), 0.36)
         };
 
-        // Translucent cool cel-shadow & subtle sheen (respects all coat markings cleanly!)
+        // Subtle velvety matte shading on dark coats, clean soft cel on light coats
         let cel_shadow_overlay = if is_dark_coat {
-            Color::from_rgba(0.01, 0.01, 0.03, 0.42).unwrap()
+            Color::from_rgba(0.01, 0.01, 0.02, 0.22).unwrap()
         } else if is_very_light {
-            Color::from_rgba(0.24, 0.28, 0.46, 0.14).unwrap()
+            Color::from_rgba(0.24, 0.28, 0.46, 0.13).unwrap()
         } else {
-            Color::from_rgba(0.10, 0.11, 0.24, 0.16).unwrap()
+            Color::from_rgba(0.10, 0.11, 0.24, 0.14).unwrap()
         };
 
         let cel_highlight_overlay = if is_dark_coat {
-            Color::from_rgba(0.54, 0.62, 0.84, 0.16).unwrap()
+            Color::from_rgba(0.50, 0.56, 0.64, 0.05).unwrap()
         } else if is_very_light {
-            Color::from_rgba(1.0, 1.0, 1.0, 0.38).unwrap()
+            Color::from_rgba(1.0, 1.0, 1.0, 0.32).unwrap()
         } else {
-            Color::from_rgba(1.0, 0.99, 0.96, 0.22).unwrap()
+            Color::from_rgba(1.0, 0.99, 0.96, 0.18).unwrap()
         };
 
+        // Delicate muted grey-olive interior contour line for overlapping dark-on-dark limbs
         let rim_sep = if is_dark_coat {
-            rgb_color(Rgb8::new(196, 206, 224), 0.56)
+            rgb_color(Rgb8::new(168, 178, 174), 0.44)
         } else {
-            rgb_color(outline_rgb, 0.86)
+            rgb_color(outline_rgb, 0.72)
         };
 
         // Tail base color (Siamese uses dark seal points) + luminance-guaranteed privacy curtain rim

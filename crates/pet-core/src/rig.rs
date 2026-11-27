@@ -56,27 +56,26 @@ impl Vec3 {
 pub struct RigAnchors;
 
 impl RigAnchors {
-    pub const TORSO_CENTER: Vec3 = Vec3::new(-4.0, 4.0, -8.0);
-    pub const HEAD_BASE_CENTER: Vec3 = Vec3::new(-6.0, -56.0, -4.0);
-    pub const LEFT_SHOULDER: Vec3 = Vec3::new(23.0, -12.0, 4.0);
-    pub const RIGHT_SHOULDER: Vec3 = Vec3::new(-31.0, -12.0, 4.0);
+    pub const TORSO_CENTER: Vec3 = Vec3::new(-4.0, 6.0, -8.0);
+    pub const HEAD_BASE_CENTER: Vec3 = Vec3::new(-4.0, -48.0, -4.0);
+    pub const LEFT_SHOULDER: Vec3 = Vec3::new(19.0, -10.0, 4.0);
+    pub const RIGHT_SHOULDER: Vec3 = Vec3::new(-27.0, -10.0, 4.0);
 
-    /// Tucked back paws staged slightly wider at the hips so front paws rest flat on the
-    /// desk behind the Spacebar with zero geometric overlap.
-    pub const BACK_PAW_LEFT: Vec3 = Vec3::new(38.0, 40.0, -4.0);
-    pub const BACK_PAW_RIGHT: Vec3 = Vec3::new(-38.0, 40.0, -4.0);
+    /// Tucked haunches seated snugly behind the keyboard without protruding side circles.
+    pub const BACK_PAW_LEFT: Vec3 = Vec3::new(22.0, 44.0, -4.0);
+    pub const BACK_PAW_RIGHT: Vec3 = Vec3::new(-30.0, 44.0, -4.0);
 
-    /// Calm idle floor-rest front paw positions (engaged after `7.5 s` of inactivity).
-    pub const IDLE_FLOOR_PAW_LEFT: Vec3 = Vec3::new(15.0, 46.5, 4.0);
-    pub const IDLE_FLOOR_PAW_RIGHT: Vec3 = Vec3::new(-21.0, 46.5, 4.0);
+    /// Calm idle seated front paw positions (planted side-by-side right behind the keyboard).
+    pub const IDLE_FLOOR_PAW_LEFT: Vec3 = Vec3::new(9.5, 49.0, 4.0);
+    pub const IDLE_FLOOR_PAW_RIGHT: Vec3 = Vec3::new(-17.5, 49.0, 4.0);
 
     /// Cozy sleep tucked front paws.
-    pub const SLEEP_PAW_LEFT: Vec3 = Vec3::new(20.0, 38.0, 2.0);
-    pub const SLEEP_PAW_RIGHT: Vec3 = Vec3::new(-26.0, 38.0, 2.0);
+    pub const SLEEP_PAW_LEFT: Vec3 = Vec3::new(16.0, 40.0, 2.0);
+    pub const SLEEP_PAW_RIGHT: Vec3 = Vec3::new(-24.0, 40.0, 2.0);
 
     /// Hidden behind-tail typing paw anchors during Privacy Mode.
-    pub const PRIVACY_PAW_LEFT: Vec3 = Vec3::new(24.0, 56.0, 10.0);
-    pub const PRIVACY_PAW_RIGHT: Vec3 = Vec3::new(-18.0, 56.0, 10.0);
+    pub const PRIVACY_PAW_LEFT: Vec3 = Vec3::new(20.0, 56.0, 10.0);
+    pub const PRIVACY_PAW_RIGHT: Vec3 = Vec3::new(-16.0, 56.0, 10.0);
 }
 
 /// Deterministic weak-perspective 2.5D projection used consistently by both `pet-core` and `pet-render`.
@@ -160,24 +159,24 @@ pub struct FrameHitboxes {
 }
 
 /// Map normalized keyboard coordinates `kb_x, kb_y in [-1, 1]` onto canonical 3D desk space.
-/// Keyboard sits slightly right-of-center to balance the miniature mouse on the viewer's left.
+/// Compact, sleek foreshortened 65% keyboard balanced with the small pebble mouse on the left.
 pub fn keyboard_local_to_world(kb_x: f32, kb_y: f32, depressed: f32) -> Vec3 {
-    let center_x = 24.0;
-    let center_y = 77.0;
-    let half_w = 104.0;
-    let half_h = 24.0;
+    let center_x = 18.0;
+    let center_y = 78.0;
+    let half_w = 96.0;
+    let half_h = 19.5;
     // Slight perspective tilt: top row (nearest cat, kb_y = -1) is slightly narrower than front row (kb_y = +1)
-    let depth_z = kb_y * 28.0;
+    let depth_z = kb_y * 24.0;
     let x = center_x + kb_x * half_w;
-    let y = center_y + kb_y * half_h + depressed * 3.2;
+    let y = center_y + kb_y * half_h + depressed * 2.8;
     Vec3::new(x, y, depth_z)
 }
 
-/// Canonical 3D center of the miniature oval mouse (viewer's left = cat's right paw).
+/// Canonical 3D center of the compact pebble-oval mouse (viewer's left = cat's right paw).
 pub fn mouse_world_pos(offset_x: f32, offset_y: f32) -> Vec3 {
     Vec3::new(
-        -113.0 + offset_x.clamp(-1.0, 1.0) * 11.0,
-        74.0 + offset_y.clamp(-1.0, 1.0) * 8.0,
+        -104.0 + offset_x.clamp(-1.0, 1.0) * 10.0,
+        75.0 + offset_y.clamp(-1.0, 1.0) * 7.0,
         4.0,
     )
 }
@@ -186,5 +185,5 @@ pub fn mouse_world_pos(offset_x: f32, offset_y: f32) -> Vec3 {
 /// split LMB/RMB button caps and recessed scroll wheel stay unoccluded by the right paw.
 pub fn mouse_paw_palm_world(offset_x: f32, offset_y: f32) -> Vec3 {
     let c = mouse_world_pos(offset_x, offset_y);
-    Vec3::new(c.x + 2.5, c.y - 8.5, c.z + 2.0)
+    Vec3::new(c.x + 2.0, c.y - 6.0, c.z + 2.0)
 }

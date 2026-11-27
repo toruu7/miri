@@ -177,11 +177,10 @@ impl LayeredSurface {
                 .as_ref()
                 .map(|p| p as *const POINT)
                 .unwrap_or(std::ptr::null());
-            let size_ptr = if update_size {
-                &size as *const SIZE
-            } else {
-                std::ptr::null()
-            };
+            // Win32 UpdateLayeredWindowIndirect requires a non-null `psize` whenever `hdcSrc` is
+            // provided; passing NULL causes DWM to skip committing updated pixels even when
+            // `prcDirty` is set, freezing the layered window on its initial frame.
+            let size_ptr = &size as *const SIZE;
             let dirty_ptr = clamped_dirty
                 .as_ref()
                 .map(|r| r as *const RECT)

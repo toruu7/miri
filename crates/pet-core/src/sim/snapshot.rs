@@ -45,6 +45,8 @@ pub struct SimSnapshot {
     pub eyelid_close: f32,
     pub happy_squint: f32,
     pub ear_relax: f32,
+    pub ear_relax_l: f32,
+    pub ear_relax_r: f32,
     pub ear_twitch_l: f32,
     pub ear_twitch_r: f32,
     pub focus_intensity: f32,
@@ -52,6 +54,9 @@ pub struct SimSnapshot {
     pub blush_amount: f32,
     pub purr_intensity: f32,
     pub purr_phase: f32,
+    /// Head-local normalized scratch point `(u, v) in [-1, 1]^2` while head scratching is active.
+    pub scratch_spot: Option<Vec2>,
+    pub scratch_intensity: f32,
 
     // Torso, limbs & posture
     pub breath_phase: f32,

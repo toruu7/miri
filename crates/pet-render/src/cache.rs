@@ -4,7 +4,7 @@ use crate::peripherals::draw_single_keycap_sculpted;
 use crate::RenderOptions;
 use pet_core::{
     keycap_specs, keyboard_local_to_world, project_25d, BackdropMode, PeripheralStyle, Rgb8, Vec2,
-    Vec3, BASE_CANVAS_H, BASE_CANVAS_W,
+    BASE_CANVAS_H, BASE_CANVAS_W,
 };
 use tiny_skia::{Color, Mask, PathBuilder, Pixmap, PixmapPaint, Transform};
 
@@ -93,29 +93,18 @@ impl TightStaticDeskCache {
         let hf = h as f32;
         let s = (wf / BASE_CANVAS_W).min(hf / BASE_CANVAS_H);
 
-        // Compute tight bounding box covering desk shadow + keyboard chassis + skirt
-        let shadow_c = project_25d(Vec3::new(4.0, 92.0, 8.0), wf, hf);
-        let tl = project_25d(keyboard_local_to_world(-1.08, -1.18, 0.0), wf, hf);
-        let tr = project_25d(keyboard_local_to_world(1.08, -1.18, 0.0), wf, hf);
-        let br = project_25d(keyboard_local_to_world(1.10, 1.20, 0.0), wf, hf);
-        let bl = project_25d(keyboard_local_to_world(-1.10, 1.20, 0.0), wf, hf);
+        // Compute tight bounding box covering keyboard chassis + subtle drop shadow
+        let tl = project_25d(keyboard_local_to_world(-1.05, -1.14, 0.0), wf, hf);
+        let tr = project_25d(keyboard_local_to_world(1.05, -1.14, 0.0), wf, hf);
+        let br = project_25d(keyboard_local_to_world(1.06, 1.16, 0.0), wf, hf);
+        let bl = project_25d(keyboard_local_to_world(-1.06, 1.16, 0.0), wf, hf);
 
-        let min_x = (shadow_c.x - 138.0 * s)
-            .min(tl.x)
-            .min(bl.x)
-            .floor()
-            .clamp(0.0, wf) as i32;
-        let min_y = (tl.y.min(tr.y).min(shadow_c.y - 28.0 * s) - 6.0 * s)
-            .floor()
-            .clamp(0.0, hf) as i32;
-        let max_x = (shadow_c.x + 138.0 * s)
-            .max(tr.x)
-            .max(br.x)
+        let min_x = (tl.x.min(bl.x) - 6.0 * s).floor().clamp(0.0, wf) as i32;
+        let min_y = (tl.y.min(tr.y) - 6.0 * s).floor().clamp(0.0, hf) as i32;
+        let max_x = (tr.x.max(br.x) + 6.0 * s)
             .ceil()
             .clamp(min_x as f32 + 1.0, wf) as i32;
-        let max_y = (shadow_c.y + 30.0 * s)
-            .max(br.y + 10.0 * s)
-            .max(bl.y + 10.0 * s)
+        let max_y = (br.y.max(bl.y) + 12.0 * s)
             .ceil()
             .clamp(min_y as f32 + 1.0, hf) as i32;
 
@@ -126,36 +115,30 @@ impl TightStaticDeskCache {
         let oy = min_y as f32;
         let shift = |p: Vec2| Vec2::new(p.x - ox, p.y - oy);
 
-        // 1. Soft two-step grounded desk contact shadow (alpha >= 8 clean for DWM click-through)
-        if let Some(p) = ellipse_path(
-            shadow_c.x - ox,
-            shadow_c.y - oy,
-            134.0 * s,
-            24.0 * s,
-        ) {
-            fill_path(&mut cache, &p, Color::from_rgba(0.03, 0.04, 0.08, 0.16).unwrap(), aa);
-        }
-        if let Some(p) = ellipse_path(
-            shadow_c.x - ox + 10.0 * s,
-            shadow_c.y - oy - 1.5 * s,
-            116.0 * s,
-            17.5 * s,
-        ) {
-            fill_path(&mut cache, &p, Color::from_rgba(0.02, 0.02, 0.05, 0.18).unwrap(), aa);
-        }
-
-        // 2. Chamfered 65% mechanical keyboard chassis (3-tone cel housing + recessed plate)
+        // 1. Tight subtle keyboard drop shadow (no floating desk pad — floats cleanly over wallpaper!)
         let tl_s = shift(tl);
         let tr_s = shift(tr);
         let br_s = shift(br);
         let bl_s = shift(bl);
-        let skirt = 6.2 * s;
+        let sh_y = 7.5 * s;
+        if let Some(p) = rounded_quad(
+            Vec2::new(tl_s.x, tl_s.y + sh_y),
+            Vec2::new(tr_s.x, tr_s.y + sh_y),
+            Vec2::new(br_s.x + 1.5 * s, br_s.y + sh_y),
+            Vec2::new(bl_s.x - 1.5 * s, bl_s.y + sh_y),
+            5.0 * s,
+        ) {
+            fill_path(&mut cache, &p, Color::from_rgba(0.02, 0.02, 0.05, 0.18).unwrap(), aa);
+        }
+
+        // 2. Sleek compact 65% mechanical keyboard chassis
+        let skirt = 4.6 * s;
         if let Some(p) = rounded_quad(
             Vec2::new(tl_s.x, tl_s.y + skirt),
             Vec2::new(tr_s.x, tr_s.y + skirt),
             Vec2::new(br_s.x, br_s.y + skirt),
             Vec2::new(bl_s.x, bl_s.y + skirt),
-            5.5 * s,
+            4.6 * s,
         ) {
             fill_path(
                 &mut cache,
@@ -163,24 +146,9 @@ impl TightStaticDeskCache {
                 rgb_color(per.keyboard_case.scale(0.55), 1.0),
                 aa,
             );
-            stroke_path(
-                &mut cache,
-                &p,
-                rgb_color(per.keyboard_case.scale(0.32), 0.92),
-                optical_stroke(1.15, s),
-                aa,
-            );
         }
-        if let Some(p) = rounded_quad(tl_s, tr_s, br_s, bl_s, 5.2 * s) {
+        if let Some(p) = rounded_quad(tl_s, tr_s, br_s, bl_s, 4.4 * s) {
             fill_path(&mut cache, &p, rgb_color(per.keyboard_case, 1.0), aa);
-            // Crisp top bezel sheen
-            stroke_path(
-                &mut cache,
-                &p,
-                rgb_color(per.keyboard_case.lerp(Rgb8::new(255, 255, 255), 0.22), 0.60),
-                optical_stroke(1.0, s),
-                aa,
-            );
         }
 
         // Recessed inner switch plate behind all 68 keycaps
@@ -275,72 +243,54 @@ impl StaticMouseSprite {
     }
 
     fn build(&mut self, s: f32, per: &PeripheralStyle, aa: bool) {
-        let rx = 19.5 * s;
-        let ry = 23.0 * s;
-        let pad = (6.5 * s).ceil() + 3.0;
+        // Compact minimalist pebble-white oval mouse matching LittleOne proportions
+        let rx = 13.5 * s;
+        let ry = 16.5 * s;
+        let pad = (5.5 * s).ceil() + 3.0;
         let sw = ((rx + pad) * 2.0).ceil().max(16.0) as u32;
         let sh = ((ry + pad + 3.0 * s) * 2.0).ceil().max(16.0) as u32;
         let cx = sw as f32 * 0.5;
-        let cy = sh as f32 * 0.5 - 1.5 * s;
+        let cy = sh as f32 * 0.5 - 1.2 * s;
 
         let mut sprite = Pixmap::new(sw, sh).expect("mouse sprite");
 
-        // Grounded desk shadow
-        if let Some(p) = ellipse_path(cx, cy + 4.0 * s, rx * 1.05, ry * 0.96) {
-            fill_path(&mut sprite, &p, Color::from_rgba(0.03, 0.04, 0.08, 0.28).unwrap(), aa);
+        // Subtle tight drop shadow
+        if let Some(p) = ellipse_path(cx, cy + 3.2 * s, rx * 1.02, ry * 0.94) {
+            fill_path(&mut sprite, &p, Color::from_rgba(0.02, 0.03, 0.06, 0.22).unwrap(), aa);
         }
 
-        // Lower 3D mouse chassis skirt
-        if let Some(p) = ellipse_path(cx, cy + 2.2 * s, rx, ry) {
-            fill_path(&mut sprite, &p, rgb_color(per.mouse_body.scale(0.68), 1.0), aa);
+        // Subtle lower 3D mouse lip
+        if let Some(p) = ellipse_path(cx, cy + 1.6 * s, rx, ry) {
+            fill_path(&mut sprite, &p, rgb_color(per.mouse_body.scale(0.76), 1.0), aa);
         }
 
-        // Main cel-shaded mouse shell
-        let outline_col = rgb_color(per.mouse_body.scale(0.42), 0.95);
+        // Clean matte-white pebble shell with thin crisp border
+        let outline_col = rgb_color(per.mouse_body.scale(0.32), 0.90);
         if let Some(p) = ellipse_path(cx, cy, rx, ry) {
             fill_path(&mut sprite, &p, rgb_color(per.mouse_body, 1.0), aa);
-
-            // Subtle cel highlight on upper palm dome (facing cat)
-            if let Some(dome) = ellipse_path(cx + rx * 0.08, cy - ry * 0.34, rx * 0.62, ry * 0.34) {
-                fill_path(
-                    &mut sprite,
-                    &dome,
-                    rgb_color(per.mouse_body.lerp(Rgb8::new(255, 255, 255), 0.55), 0.55),
-                    aa,
-                );
-            }
-            // Crisp outer contour
-            stroke_path(&mut sprite, &p, outline_col, optical_stroke(1.35, s), aa);
+            stroke_path(&mut sprite, &p, outline_col, optical_stroke(1.05, s), aa);
         }
 
-        // Sculpted transverse button hinge line across middle of mouse (separates palm dome from front LMB/RMB caps)
-        let seam_col = rgb_color(per.mouse_body.scale(0.56), 0.85);
-        let seam_w = optical_stroke(1.05, s);
-        let mut hpb = PathBuilder::new();
-        hpb.move_to(cx - rx * 0.92, cy + 0.2 * s);
-        hpb.quad_to(cx, cy - 1.8 * s, cx + rx * 0.92, cy + 0.2 * s);
-        if let Some(hp) = hpb.finish() {
-            stroke_path(&mut sprite, &hp, seam_col, seam_w, aa);
-        }
-
-        // Center split seam between front RMB (viewer-left) and front LMB (viewer-right)
+        // Delicate faint button split seam
+        let seam_col = rgb_color(per.mouse_body.scale(0.72), 0.55);
+        let seam_w = optical_stroke(0.75, s);
         let mut spb = PathBuilder::new();
-        spb.move_to(cx, cy - 0.5 * s);
-        spb.line_to(cx, cy + ry * 0.96);
+        spb.move_to(cx, cy + 0.5 * s);
+        spb.line_to(cx, cy + ry * 0.92);
         if let Some(sp) = spb.finish() {
             stroke_path(&mut sprite, &sp, seam_col, seam_w, aa);
         }
 
-        // Dark recessed center scroll-wheel well (facing viewer, unoccluded by paw!)
-        let well_w = 5.4 * s;
-        let well_h = 11.4 * s;
+        // Compact minimal scroll-wheel slot
+        let well_w = 3.2 * s;
+        let well_h = 7.0 * s;
         if let Some(well) =
-            crate::geom::rounded_rect(cx - well_w * 0.5, cy + 3.2 * s, well_w, well_h, 2.5 * s)
+            crate::geom::rounded_rect(cx - well_w * 0.5, cy + 2.2 * s, well_w, well_h, 1.6 * s)
         {
             fill_path(
                 &mut sprite,
                 &well,
-                rgb_color(per.mouse_wheel.scale(0.32), 0.96),
+                rgb_color(per.mouse_wheel.scale(0.45), 0.90),
                 aa,
             );
         }

@@ -175,8 +175,8 @@ pub fn draw_mouse(
     let aa = !chroma_hard_edge;
     let raw_pos = project_25d(mouse_world_pos(sim.mouse_offset.x, sim.mouse_offset.y), wf, hf);
     let pos = Vec2::new(raw_pos.x.round(), raw_pos.y.round());
-    let rx = 19.5 * s;
-    let ry = 23.0 * s;
+    let rx = 13.5 * s;
+    let ry = 16.5 * s;
 
     // 1. Blit pre-baked tight mouse shell sprite
     sprite.ensure_and_blit(pixmap, pos, s, per, chroma_hard_edge);
@@ -221,12 +221,12 @@ pub fn draw_mouse(
         );
     }
 
-    // 3. Recessed scroll wheel with continuous rolling tread notches (`mouse_scroll_angle`)
+    // 3. Compact scroll wheel with rolling tread notches (`mouse_scroll_angle`)
     let well_x = pos.x;
-    let well_top = pos.y + 3.6 * s;
-    let wheel_w = 4.2 * s;
-    let wheel_h = 10.6 * s;
-    let pulse_shift = sim.mouse_scroll_pulse.clamp(-1.0, 1.0) * 1.1 * s;
+    let well_top = pos.y + 2.4 * s;
+    let wheel_w = 2.6 * s;
+    let wheel_h = 6.6 * s;
+    let pulse_shift = sim.mouse_scroll_pulse.clamp(-1.0, 1.0) * 0.85 * s;
     let scroll_glow = sim.mouse_scroll_pulse.abs().clamp(0.0, 1.0);
 
     // Wheel cylinder body

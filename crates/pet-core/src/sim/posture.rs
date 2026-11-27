@@ -92,8 +92,11 @@ impl PostureController {
             left_btn.is_some() || left_clicked || right_btn.is_some() || right_clicked || wheel_delta != 0;
 
         if moved {
-            self.mouse_offset.x = (self.mouse_offset.x + dx as f32 * 0.0028).clamp(-1.0, 1.0);
-            self.mouse_offset.y = (self.mouse_offset.y + dy as f32 * 0.0028).clamp(-1.0, 1.0);
+            // Cat-facing-viewer perspective (180 deg rotated like the keyboard):
+            // physical +dx (right) moves virtual mouse viewer-left (-offset_x),
+            // physical -dy (forward) moves virtual mouse viewer-down (+offset_y).
+            self.mouse_offset.x = (self.mouse_offset.x - dx as f32 * 0.0028).clamp(-1.0, 1.0);
+            self.mouse_offset.y = (self.mouse_offset.y - dy as f32 * 0.0028).clamp(-1.0, 1.0);
             if dx.abs() + dy.abs() >= 3 {
                 self.right_paw_kb_claim_sec = (self.right_paw_kb_claim_sec - 0.35).max(0.0);
             }
@@ -175,7 +178,7 @@ impl PostureController {
 
         self.mode = if force_privacy {
             PostureMode::PrivacyCovered
-        } else if force_sleep || (!force_awake_neutral && sleep_t > 0.35) {
+        } else if force_sleep || (!force_awake_neutral && idle_sec >= 14.5 && sleep_t > 0.35) {
             PostureMode::Sleeping
         } else if !force_awake_neutral && !force_typing && idle_sec >= IDLE_FLOOR_REST_SEC {
             PostureMode::IdleFloorRest

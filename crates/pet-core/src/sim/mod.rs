@@ -64,6 +64,7 @@ pub struct PetSim {
     torso_bounce: Spring1D,
     tail_curl: Spring1D,
     sleep_t: f32,
+    paw_stiffness_t: f32,
 
     privacy_bob: f32,
     privacy_tail_ripple: f32,
@@ -107,12 +108,13 @@ impl Default for PetSim {
             right_paw_kb_target: keyboard_local_to_world(-0.34, -0.10, 0.0),
             right_paw_pos: Spring3D::new(right_mouse, 28.0, 0.72, 0.08, 0.35),
             right_paw_lift: Spring1D::new(0.0, 32.0, 0.56, 0.005, 0.03),
-            head_offset: Spring2D::new(Vec2::default(), 16.0, 0.74, 0.04, 0.2),
-            head_tilt: Spring1D::new(0.0, 15.0, 0.68, 0.001, 0.008),
+            head_offset: Spring2D::new(Vec2::default(), 12.0, 0.80, 0.04, 0.2),
+            head_tilt: Spring1D::new(0.0, 11.5, 0.76, 0.001, 0.008),
             head_squash: Spring1D::new(0.0, 24.0, 0.58, 0.004, 0.02),
             torso_bounce: Spring1D::new(0.0, 26.0, 0.60, 0.004, 0.03),
             tail_curl: Spring1D::new(0.0, 14.0, 0.66, 0.004, 0.02),
             sleep_t: 0.0,
+            paw_stiffness_t: 1.0,
             privacy_bob: 0.0,
             privacy_tail_ripple: 0.0,
             drowsy_z_spawn_accum: 0.0,
@@ -370,14 +372,15 @@ impl PetSim {
                 match vis_spec.paw_side {
                     PawSide::Left => {
                         self.left_paw_target = target_3d;
-                        self.left_paw_lift.kick_pos(0.88, 9.5);
+                        // Downward strike press into keycap with crisp spring rebound
+                        self.left_paw_lift.kick_pos(-0.30, -4.5);
                         if (self.anon_salt & 0x07) == 0 {
                             self.expression.flick_ear(true, 4.2);
                         }
                     }
                     PawSide::Right => {
                         self.right_paw_kb_target = target_3d;
-                        self.right_paw_lift.kick_pos(0.88, 9.5);
+                        self.right_paw_lift.kick_pos(-0.30, -4.5);
                         self.posture.claim_right_paw_for_keyboard(0.75);
                         if (self.anon_salt & 0x07) == 1 {
                             self.expression.flick_ear(false, 4.2);
@@ -398,6 +401,11 @@ impl PetSim {
         } else {
             self.keys_held[vis_idx] = false;
             self.key_hold_sec[vis_idx] = 0.0;
+            // Gentle upward rebound lift on key release for rhythmic typing bounce
+            match vis_spec.paw_side {
+                PawSide::Left => self.left_paw_lift.impulse(3.6),
+                PawSide::Right => self.right_paw_lift.impulse(3.6),
+            }
             self.dirty = true;
         }
     }
@@ -406,20 +414,20 @@ impl PetSim {
         if self.popups.len() >= 8 {
             self.popups.remove(0);
         }
-        let jitter = ((self.anon_salt & 0xFF) as f32 / 255.0 - 0.5) * 18.0;
+        let jitter = ((self.anon_salt & 0xFF) as f32 / 255.0 - 0.5) * 26.0;
         self.anon_salt = self
             .anon_salt
             .wrapping_mul(1_664_525)
             .wrapping_add(1_013_904_223);
-        let x = 24.0 + kb_x * 84.0 + jitter;
+        let x = 18.0 + kb_x * 86.0 + jitter;
         self.popups.push(FloatingPopup {
             label: label.to_string(),
             x,
-            y: 34.0,
-            vx: jitter * 0.45,
-            vy: -56.0,
+            y: 44.0,
+            vx: jitter * 0.55,
+            vy: -48.0,
             age: 0.0,
-            ttl: 0.62,
+            ttl: 0.68,
             wide,
         });
     }
@@ -470,8 +478,35 @@ impl PetSim {
         }
     }
 
-    /// Hover-rub head patting (called ONLY when click-through is unlocked and no mouse button is held).
-    /// Returns `true` if patting is actively triggered/maintained (so overlay avoids redundant wake-storms on static hover).
+    /// Localized 2D exact-spot head scratching (works both unlocked and click-through locked).
+    #[allow(clippy::too_many_arguments)]
+    pub fn on_head_scratch(
+        &mut self,
+        inside_head: bool,
+        norm_u: f32,
+        norm_v: f32,
+        hover_pos_dip: Vec2,
+        buttons_held: bool,
+        cfg: &Config,
+    ) -> bool {
+        let triggered = self.expression.on_head_scratch(
+            inside_head,
+            norm_u,
+            norm_v,
+            hover_pos_dip,
+            buttons_held,
+            cfg,
+            self.is_privacy_active(),
+            self.game_hidden,
+        );
+        if triggered {
+            self.head_squash.impulse(6.2);
+            self.wake_active();
+        }
+        triggered || self.expression.pat_active
+    }
+
+    /// Hover-rub head patting (backward-compatible 1D helper).
     pub fn on_head_hover_dip(&mut self, inside_head: bool, hover_x_dip: f32, cfg: &Config) -> bool {
         let triggered = self.expression.on_head_hover_dip(
             inside_head,
@@ -481,7 +516,7 @@ impl PetSim {
             self.game_hidden,
         );
         if triggered {
-            self.head_squash.impulse(6.8);
+            self.head_squash.impulse(6.2);
             self.wake_active();
         }
         triggered || self.expression.pat_active
@@ -646,14 +681,19 @@ impl PetSim {
             self.sleep_t,
         );
 
-        // Dynamic damping: critically damped for calm idle floor-rest, snappy underdamped for typing/clicks
-        if self.posture.mode == PostureMode::IdleFloorRest || self.posture.mode == PostureMode::Sleeping {
-            self.left_paw_pos.set_params(10.0, 0.96);
-            self.right_paw_pos.set_params(10.0, 0.96);
+        // Smoothly blended paw stiffness ramp (zero acceleration jolt between idle/sleep and active!)
+        let want_active_stiff = if self.posture.mode == PostureMode::IdleFloorRest
+            || self.posture.mode == PostureMode::Sleeping
+        {
+            0.0
         } else {
-            self.left_paw_pos.set_params(30.0, 0.72);
-            self.right_paw_pos.set_params(30.0, 0.72);
-        }
+            1.0
+        };
+        self.paw_stiffness_t = exp_smooth(self.paw_stiffness_t, want_active_stiff, 8.0, dt);
+        let paw_omega = 11.0 + self.paw_stiffness_t * 19.0;
+        let paw_zeta = 0.96 - self.paw_stiffness_t * 0.24;
+        self.left_paw_pos.set_params(paw_omega, paw_zeta);
+        self.right_paw_pos.set_params(paw_omega, paw_zeta);
 
         // Compute destination 3D positions for front paws
         let left_dest = match self.posture.mode {
@@ -665,8 +705,11 @@ impl PetSim {
             PostureMode::Sleeping => RigAnchors::SLEEP_PAW_LEFT,
             PostureMode::IdleFloorRest => RigAnchors::IDLE_FLOOR_PAW_LEFT,
             PostureMode::ActiveDesk => {
-                if self.idle_sec > 2.2 && !force_typing_pose {
-                    keyboard_local_to_world(0.28, -0.10, 0.0)
+                if !force_typing_pose && self.idle_sec > 2.0 {
+                    let home = keyboard_local_to_world(0.28, -0.10, 0.0);
+                    let u = ((self.idle_sec - 2.0) / 1.2).clamp(0.0, 1.0);
+                    let smooth_u = u * u * (3.0 - 2.0 * u);
+                    self.left_paw_target.lerp(home, smooth_u)
                 } else {
                     self.left_paw_target
                 }
@@ -739,15 +782,28 @@ impl PetSim {
 
         let gaze = self.gaze.eye_gaze.pos();
         let focus_lean_y = focus * 3.2;
-        let head_x_goal = gaze.x * 5.2;
-        let head_y_goal = gaze.y * 3.4 + focus_lean_y + self.head_squash.pos() * 4.5
+        let scratch_lean = if self.expression.scratch_intensity > 0.01 && !force_privacy_pose {
+            let sp = self.expression.scratch_spot.unwrap_or_default();
+            Vec2::new(
+                sp.x * 6.5 * self.expression.scratch_intensity,
+                sp.y * 3.2 * self.expression.scratch_intensity,
+            )
+        } else {
+            Vec2::default()
+        };
+        let head_x_goal = gaze.x * 5.0 + scratch_lean.x;
+        let head_y_goal = gaze.y * 3.2
+            + focus_lean_y
+            + scratch_lean.y
+            + self.head_squash.pos() * 4.5
             - self.torso_bounce.pos() * 3.6
             - self.expression.yawn_t * 3.0;
         self.head_offset.set_target(Vec2::new(head_x_goal, head_y_goal));
         self.spring_nan_resets += self.head_offset.step(dt);
 
         let tilt_goal = if self.expression.pat_active && !force_privacy_pose {
-            (self.time_sec * 4.8).sin() * 0.065
+            let sp_x = self.expression.scratch_spot.map(|s| s.x).unwrap_or(0.0);
+            sp_x * 0.14 + (self.time_sec * 4.8).sin() * 0.045
         } else if force_privacy_pose {
             -0.065 // Polite slight head turn matching averted eyes
         } else if self.expression.yawn_t > 0.1 {
@@ -862,16 +918,20 @@ impl PetSim {
             ExpressionState::HappyPat => 1.0,
             ExpressionState::Yawning => self.expression.yawn_t.clamp(0.0, 1.0),
             ExpressionState::PrivacyAverted => 0.16, // Calm politely averted upper lid, open eyes!
-            ExpressionState::Focused => (0.14 * focus).max(blink_close),
-            ExpressionState::Neutral => blink_close,
+            ExpressionState::Focused => (0.14 * focus).max(blink_close).max(self.sleep_t * 0.85),
+            // Smooth eyelid opening on wake-from-sleep instead of single-frame snap open
+            ExpressionState::Neutral => blink_close.max(self.sleep_t * 0.85),
         };
 
         let lp = self.left_paw_pos.pos();
         let rp = self.right_paw_pos.pos();
-        let ll = self.left_paw_lift.pos().clamp(-0.35, 1.35);
-        let rl = self.right_paw_lift.pos().clamp(-0.35, 1.35);
-        let left_world = Vec3::new(lp.x, lp.y - ll.max(0.0) * 12.0, lp.z);
-        let right_world = Vec3::new(rp.x, rp.y - rl.max(0.0) * 12.0, rp.z);
+        let ll = self.left_paw_lift.pos().clamp(-0.45, 1.0);
+        let rl = self.right_paw_lift.pos().clamp(-0.45, 1.0);
+        let left_world = Vec3::new(lp.x, lp.y - ll * 9.0, lp.z);
+        let right_world = Vec3::new(rp.x, rp.y - rl * 9.0, rp.z);
+
+        let ear_l = self.expression.ear_relax_l.pos().clamp(-0.25, 1.10);
+        let ear_r = self.expression.ear_relax_r.pos().clamp(-0.25, 1.10);
 
         SimSnapshot {
             time_sec: self.time_sec,
@@ -886,7 +946,9 @@ impl PetSim {
             eye_gaze: self.gaze.eye_gaze.pos(),
             eyelid_close,
             happy_squint,
-            ear_relax: self.expression.ear_relax.pos().clamp(-0.25, 1.0),
+            ear_relax: (ear_l + ear_r) * 0.5,
+            ear_relax_l: ear_l,
+            ear_relax_r: ear_r,
             ear_twitch_l: self.expression.ear_twitch_l.pos().clamp(-0.6, 0.6),
             ear_twitch_r: self.expression.ear_twitch_r.pos().clamp(-0.6, 0.6),
             focus_intensity: focus,
@@ -894,13 +956,15 @@ impl PetSim {
             blush_amount: self.expression.blush_amount,
             purr_intensity: self.expression.purr_intensity,
             purr_phase: self.expression.purr_phase,
+            scratch_spot: self.expression.scratch_spot,
+            scratch_intensity: self.expression.scratch_intensity,
             breath_phase: self.time_sec * 1.85,
             torso_bounce: self.torso_bounce.pos().clamp(-0.4, 1.2),
             floor_rest_t: self.posture.floor_rest.pos().clamp(0.0, 1.0),
             left_paw_world: left_world,
             right_paw_world: right_world,
-            left_paw_strike: ll.clamp(0.0, 1.0),
-            right_paw_strike: rl.clamp(0.0, 1.0),
+            left_paw_strike: (-ll).clamp(0.0, 1.0),
+            right_paw_strike: (-rl).clamp(0.0, 1.0),
             right_paw_on_mouse: self.posture.right_paw_mouse_blend.pos().clamp(0.0, 1.0),
             mouse_offset: self.posture.mouse_offset,
             mouse_left_press: self.posture.mouse_left_press.pos().clamp(0.0, 1.2),
@@ -1119,28 +1183,51 @@ mod tests {
     }
 
     #[test]
-    fn click_through_lock_disables_head_patting_and_unlocked_triggers_purr_and_blush() {
+    fn mouse_motion_follows_cat_pov_and_wake_from_sleep_is_immediate() {
+        let mut sim = PetSim::default();
+        // Physical mouse right (+dx) and forward (-dy) must move virtual mouse viewer-left (-x) and viewer-down (+y)
+        sim.on_mouse_input(50, -50, None, false, None, false, 0, None);
+        let s = sim.snapshot();
+        assert!(s.mouse_offset.x < -0.05, "expected viewer-left offset, got {:?}", s.mouse_offset);
+        assert!(s.mouse_offset.y > 0.05, "expected viewer-down offset, got {:?}", s.mouse_offset);
+
+        // Fall fully asleep
+        for _ in 0..320 {
+            sim.step(1.0 / 12.0);
+        }
+        assert_eq!(sim.snapshot().posture, PostureMode::Sleeping);
+        // Single keystroke must wake posture to ActiveDesk on the very next frame (0 ms stall)
+        sim.on_key_event(PhysicalKey::F, true, &Config::default());
+        sim.step(1.0 / 60.0);
+        assert_eq!(sim.snapshot().posture, PostureMode::ActiveDesk);
+    }
+
+    #[test]
+    fn localized_head_scratch_works_when_locked_and_flattens_touched_ear() {
         let mut sim = PetSim::default();
         let locked_cfg = Config {
             click_through_locked: true,
             ..Config::default()
         };
+        // Buttons held must suppress scratching (prevents misfire during window drag / selection)
         for i in 0..20 {
             let x = if i % 2 == 0 { 10.0 } else { 40.0 };
-            sim.on_head_hover_dip(true, x, &locked_cfg);
+            sim.on_head_scratch(true, -0.7, -0.3, Vec2::new(x, 0.0), true, &locked_cfg);
         }
         assert!(!sim.snapshot().patting_active);
 
-        let unlocked_cfg = Config::default();
-        for i in 0..20 {
-            let x = if i % 2 == 0 { 10.0 } else { 40.0 };
-            sim.on_head_hover_dip(true, x, &unlocked_cfg);
+        // Back-and-forth hover rub on viewer-left side while click-through locked triggers localized scratch
+        for i in 0..16 {
+            let x = if i % 2 == 0 { 10.0 } else { 36.0 };
+            sim.on_head_scratch(true, -0.75, -0.3, Vec2::new(x, 0.0), false, &locked_cfg);
             sim.step(0.02);
         }
         let snap = sim.snapshot();
         assert!(snap.patting_active);
         assert_eq!(snap.expression, ExpressionState::HappyPat);
-        assert!(snap.blush_amount > 0.3);
-        assert!(snap.purr_intensity > 0.3);
+        assert!(snap.blush_amount > 0.25);
+        assert!(snap.purr_intensity > 0.25);
+        assert!(snap.ear_relax_l > snap.ear_relax_r + 0.15, "left ear should flatten more when scratching left side");
+        assert!(snap.scratch_spot.is_some());
     }
 }

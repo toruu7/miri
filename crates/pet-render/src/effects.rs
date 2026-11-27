@@ -1,9 +1,9 @@
 use crate::font::draw_text_centered;
-use crate::geom::{fill_path, optical_stroke, rounded_rect, stroke_path, BBoxAcc};
+use crate::geom::{fill_path_xf, optical_stroke, rounded_rect, stroke_path_xf, BBoxAcc};
 use pet_core::{project_25d, SimSnapshot, Vec3};
-use tiny_skia::{Color, Pixmap};
+use tiny_skia::{Color, Pixmap, Transform};
 
-/// Pass 8a: Floating Showcase white keycap pop-ups (opt-in Showcase Mode only).
+/// Pass 8a: Crisp compact tilted 2.5D white keycap pop-up badges (LittleOne style).
 pub fn draw_popups(
     pixmap: &mut Pixmap,
     sim: &SimSnapshot,
@@ -15,8 +15,8 @@ pub fn draw_popups(
 ) {
     for pop in &sim.popups {
         let t = (pop.age / pop.ttl).clamp(0.0, 1.0);
-        let alpha = if t < 0.15 {
-            t / 0.15
+        let alpha = if t < 0.12 {
+            t / 0.12
         } else if t > 0.72 {
             (1.0 - t) / 0.28
         } else {
@@ -25,62 +25,80 @@ pub fn draw_popups(
         .clamp(0.0, 1.0);
 
         let pos = project_25d(Vec3::new(pop.x, pop.y, 28.0), wf, hf);
-        let cap_w = if pop.wide {
-            56.0 * s
-        } else if pop.label.len() > 2 {
-            34.0 * s
+        let pop_scale = if t < 0.15 {
+            0.78 + (t / 0.15) * 0.22
         } else {
-            23.0 * s
+            1.0 - t * 0.08
         };
-        let cap_h = 22.0 * s;
+        let cap_w = if pop.wide {
+            42.0 * s * pop_scale
+        } else if pop.label.len() > 2 {
+            28.0 * s * pop_scale
+        } else {
+            18.5 * s * pop_scale
+        };
+        let cap_h = 17.5 * s * pop_scale;
 
+        // Playful deterministic subtle tilt per popup (derived from horizontal velocity)
+        let tilt_deg = (pop.vx * 0.9).clamp(-9.0, 9.0);
+        let xf = Transform::from_rotate(tilt_deg).post_translate(pos.x, pos.y);
+
+        let pad = 6.0 * s;
         bbox.include_rect(
-            pos.x - cap_w * 0.5 - 3.0 * s,
-            pos.y - cap_h * 0.5 - 3.0 * s,
-            cap_w + 6.0 * s,
-            cap_h + 8.0 * s,
+            pos.x - cap_w * 0.5 - pad,
+            pos.y - cap_h * 0.5 - pad,
+            cap_w + pad * 2.0,
+            cap_h + pad * 2.4,
         );
 
         if let Some(skirt) = rounded_rect(
-            pos.x - cap_w * 0.5,
-            pos.y - cap_h * 0.5 + 2.6 * s,
+            -cap_w * 0.5,
+            -cap_h * 0.5 + 2.2 * s,
             cap_w,
             cap_h,
-            5.0 * s,
+            4.2 * s,
         ) {
-            fill_path(
+            fill_path_xf(
                 pixmap,
                 &skirt,
-                Color::from_rgba(0.14, 0.15, 0.20, alpha * 0.86).unwrap(),
+                Color::from_rgba(0.12, 0.13, 0.17, alpha * 0.90).unwrap(),
+                xf,
+                None,
                 aa,
             );
         }
-        if let Some(face) =
-            rounded_rect(pos.x - cap_w * 0.5, pos.y - cap_h * 0.5, cap_w, cap_h, 5.0 * s)
-        {
-            fill_path(
+        if let Some(face) = rounded_rect(-cap_w * 0.5, -cap_h * 0.5, cap_w, cap_h, 4.2 * s) {
+            fill_path_xf(
                 pixmap,
                 &face,
                 Color::from_rgba(0.97, 0.98, 0.99, alpha).unwrap(),
+                xf,
+                None,
                 aa,
             );
-            stroke_path(
+            stroke_path_xf(
                 pixmap,
                 &face,
-                Color::from_rgba(0.18, 0.20, 0.24, alpha).unwrap(),
-                optical_stroke(1.3, s),
+                Color::from_rgba(0.14, 0.15, 0.19, alpha).unwrap(),
+                optical_stroke(1.15, s),
+                xf,
+                None,
                 aa,
             );
         }
-        let font_h = if pop.label.len() > 2 { 7.5 * s } else { 11.5 * s };
+        let font_h = if pop.label.len() > 2 {
+            6.2 * s * pop_scale
+        } else {
+            9.2 * s * pop_scale
+        };
         draw_text_centered(
             pixmap,
             &pop.label,
             pos.x,
-            pos.y,
+            pos.y - 0.3 * s,
             font_h,
-            Color::from_rgba(0.12, 0.14, 0.18, alpha).unwrap(),
-            1.1,
+            Color::from_rgba(0.10, 0.12, 0.15, alpha).unwrap(),
+            1.15,
         );
     }
 }

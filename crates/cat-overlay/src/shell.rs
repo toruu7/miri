@@ -1,4 +1,5 @@
 use crate::logging::{log_info, log_warn};
+use crate::monitor::MonitorEntry;
 use pet_core::{builtin_presets, CatProfile, Config, HotkeyConfig};
 use std::ffi::OsStr;
 use std::mem::size_of;
@@ -47,9 +48,18 @@ pub const CMD_RESET_POS: u32 = 1007;
 pub const CMD_COPY_DIAG: u32 = 1008;
 pub const CMD_OPEN_CONFIG_DIR: u32 = 1009;
 pub const CMD_TOGGLE_AUTOSTART: u32 = 1010;
+pub const CMD_SNAP_BR: u32 = 1011;
+pub const CMD_SNAP_BL: u32 = 1012;
+pub const CMD_SNAP_TR: u32 = 1013;
+pub const CMD_SNAP_TL: u32 = 1014;
+pub const CMD_SCALE_MINI: u32 = 1015;
+pub const CMD_SCALE_SMALL: u32 = 1016;
+pub const CMD_SCALE_NORMAL: u32 = 1017;
+pub const CMD_SCALE_LARGE: u32 = 1018;
 pub const CMD_QUIT: u32 = 1099;
 pub const CMD_PRESET_BASE: u32 = 2000;
 pub const CMD_USER_PROFILE_BASE: u32 = 3000;
+pub const CMD_MONITOR_BASE: u32 = 4000;
 
 const TRAY_UID: u32 = 0xCA71;
 
@@ -194,6 +204,8 @@ impl HelperShell {
         cfg: &Config,
         manual_privacy: bool,
         user_profiles: &[CatProfile],
+        monitors: &[MonitorEntry],
+        current_monitor: &str,
     ) -> u32 {
         unsafe {
             let Ok(hmenu) = CreatePopupMenu() else {
@@ -261,6 +273,34 @@ impl HelperShell {
             }
 
             append_sep(hmenu);
+
+            // Quick multi-monitor, snap, and scale submenus (zero-RAM daily-driver controls)
+            if !monitors.is_empty() {
+                if let Ok(sub) = CreatePopupMenu() {
+                    for (i, m) in monitors.iter().enumerate().take(16) {
+                        let prim = if m.is_primary { " Primary," } else { "" };
+                        let lbl = format!("Display {} ({prim} {}x{})", i + 1, m.width, m.height);
+                        let is_cur = m.device_name.eq_ignore_ascii_case(current_monitor);
+                        append_item(sub, CMD_MONITOR_BASE + i as u32, &lbl, is_cur);
+                    }
+                    append_submenu(hmenu, sub, "Move to Monitor");
+                }
+            }
+            if let Ok(sub) = CreatePopupMenu() {
+                append_item(sub, CMD_SNAP_BR, "Bottom-Right", false);
+                append_item(sub, CMD_SNAP_BL, "Bottom-Left", false);
+                append_item(sub, CMD_SNAP_TR, "Top-Right", false);
+                append_item(sub, CMD_SNAP_TL, "Top-Left", false);
+                append_submenu(hmenu, sub, "Snap Position");
+            }
+            if let Ok(sub) = CreatePopupMenu() {
+                append_item(sub, CMD_SCALE_MINI, "Mini (0.6x)", (cfg.scale - 0.6).abs() < 0.05);
+                append_item(sub, CMD_SCALE_SMALL, "Small (0.85x)", (cfg.scale - 0.85).abs() < 0.05);
+                append_item(sub, CMD_SCALE_NORMAL, "Normal (1.0x)", (cfg.scale - 1.0).abs() < 0.05);
+                append_item(sub, CMD_SCALE_LARGE, "Large (1.5x)", (cfg.scale - 1.5).abs() < 0.05);
+                append_submenu(hmenu, sub, "Scale");
+            }
+
             append_item(hmenu, CMD_TOGGLE_AUTOSTART, "Auto-Start on Login", cfg.auto_start);
             append_item(hmenu, CMD_RESET_POS, "Reset Position to Primary Screen", false);
             append_item(hmenu, CMD_COPY_DIAG, "Copy Diagnostics Report", false);

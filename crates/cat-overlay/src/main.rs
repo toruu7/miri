@@ -13,8 +13,9 @@ use capture_stage::CaptureStageWindow;
 use config_store::{app_data_dir, reconcile_autostart, ConfigStore, ConfigWatcher};
 use logging::{init_logging, log_error, log_info, log_warn};
 use monitor::{
-    current_process_stats, evaluate_foreground, is_on_battery, monitor_work_area_for_hwnd,
-    monitor_work_area_for_rect, set_eco_qos,
+    current_process_stats, enumerate_monitors, evaluate_foreground, is_on_battery,
+    monitor_work_area_for_anchor, monitor_work_area_for_hwnd, monitor_work_area_for_rect,
+    set_eco_qos,
 };
 use pet_core::config::{anchor_to_work_area_pos, work_area_pos_to_norm};
 use pet_core::{
@@ -27,11 +28,12 @@ use pet_render::{RenderOptions, Renderer};
 use pipe_server::{PipeEvent, PipeSession};
 use raw_input::{InputMailbox, RawInputWorker};
 use shell::{
-    copy_text_to_clipboard, HelperShell, CMD_COPY_DIAG, CMD_OPEN_CONFIG_DIR, CMD_OPEN_DESIGNER,
-    CMD_PRESET_BASE, CMD_QUIT, CMD_RESET_POS, CMD_TOGGLE_AUTOSTART, CMD_TOGGLE_CAPTURE_STAGE,
-    CMD_TOGGLE_LOCK, CMD_TOGGLE_POPUPS, CMD_TOGGLE_PRIVACY, CMD_TOGGLE_SHOWCASE,
-    CMD_USER_PROFILE_BASE, HOTKEY_ID_CLICK_THROUGH, HOTKEY_ID_DESIGNER, HOTKEY_ID_PRIVACY,
-    WM_APP_SUMMON_ESCAPE, WM_APP_TRAY,
+    copy_text_to_clipboard, HelperShell, CMD_COPY_DIAG, CMD_MONITOR_BASE, CMD_OPEN_CONFIG_DIR,
+    CMD_OPEN_DESIGNER, CMD_PRESET_BASE, CMD_QUIT, CMD_RESET_POS, CMD_SCALE_LARGE, CMD_SCALE_MINI,
+    CMD_SCALE_NORMAL, CMD_SCALE_SMALL, CMD_SNAP_BL, CMD_SNAP_BR, CMD_SNAP_TL, CMD_SNAP_TR,
+    CMD_TOGGLE_AUTOSTART, CMD_TOGGLE_CAPTURE_STAGE, CMD_TOGGLE_LOCK, CMD_TOGGLE_POPUPS,
+    CMD_TOGGLE_PRIVACY, CMD_TOGGLE_SHOWCASE, CMD_USER_PROFILE_BASE, HOTKEY_ID_CLICK_THROUGH,
+    HOTKEY_ID_DESIGNER, HOTKEY_ID_PRIVACY, WM_APP_SUMMON_ESCAPE, WM_APP_TRAY,
 };
 use std::cell::RefCell;
 use std::mem::size_of;
@@ -278,17 +280,32 @@ fn main() {
     OVERLAY_HWND_TLS.with(|h| *h.borrow_mut() = overlay_hwnd);
     CLICK_THROUGH_LOCKED.with(|c| *c.borrow_mut() = store.config.effective_click_through());
 
-    // Initial DPI, canvas size, and clamped monitor work-area placement
+    // Initial target monitor lookup (honoring saved monitor_device_name), move-before-DPI so
+    // secondary monitors start at their native DPI on frame 1!
+    let initial_dpi = unsafe { GetDpiForWindow(overlay_hwnd).max(96) };
+    let (init_cw, init_ch) = compute_canvas_px(store.config.scale, initial_dpi);
+    let (work_area, active_mon_name) =
+        monitor_work_area_for_anchor(&store.config.anchor, init_cw as i32, init_ch as i32);
+    let (pre_x, pre_y) =
+        anchor_to_work_area_pos(&store.config.anchor, init_cw as i32, init_ch as i32, work_area);
+    unsafe {
+        let _ = SetWindowPos(
+            overlay_hwnd,
+            HWND_TOPMOST,
+            pre_x,
+            pre_y,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
     let mut dpi = unsafe { GetDpiForWindow(overlay_hwnd).max(96) };
     let (mut cw, mut ch) = compute_canvas_px(store.config.scale, dpi);
-    let (work_area, _) = monitor_work_area_for_rect(RectI32 {
-        left: store.config.anchor.fallback_abs_x,
-        top: store.config.anchor.fallback_abs_y,
-        right: store.config.anchor.fallback_abs_x + cw as i32,
-        bottom: store.config.anchor.fallback_abs_y + ch as i32,
-    });
     let (mut win_x, mut win_y) =
         anchor_to_work_area_pos(&store.config.anchor, cw as i32, ch as i32, work_area);
+    if store.config.anchor.monitor_device_name.is_empty() && !active_mon_name.is_empty() {
+        store.config.anchor.monitor_device_name = active_mon_name;
+    }
 
     let mut renderer = Renderer::new(cw, ch);
     let mut surface = match LayeredSurface::new(cw, ch) {
@@ -449,10 +466,15 @@ fn main() {
         }
 
         if actions.display_changed {
-            let (wa, _) = monitor_work_area_for_hwnd(overlay_hwnd);
-            let (cx, cy) = clamp_rect_to_work_area(win_x, win_y, cw as i32, ch as i32, wa);
+            let (wa, mon_name) =
+                monitor_work_area_for_anchor(&store.config.anchor, cw as i32, ch as i32);
+            let (cx, cy) =
+                anchor_to_work_area_pos(&store.config.anchor, cw as i32, ch as i32, wa);
             win_x = cx;
             win_y = cy;
+            if !mon_name.is_empty() {
+                store.config.anchor.monitor_device_name = mon_name;
+            }
             unsafe {
                 let _ = SetWindowPos(
                     overlay_hwnd,
@@ -491,18 +513,15 @@ fn main() {
             sim.on_pointer_leave();
         }
         if let Some((hx, hy)) = actions.hover_point_px {
-            // Bug #6 fix: stable neutral head envelope + 10 px exit hysteresis eliminates boundary chatter
-            let inside = HEAD_RECT_PX.with(|r| {
-                let rect = *r.borrow();
-                if was_in_head {
-                    rect.contains_expanded(hx, hy, 10.0)
-                } else {
-                    rect.contains(hx, hy)
-                }
-            });
-            was_in_head = inside;
-            let hx_dip = hx * 96.0 / dpi as f32;
-            let _ = sim.on_head_hover_dip(inside, hx_dip, &store.config);
+            eval_head_scratch(
+                hx,
+                hy,
+                dpi,
+                any_mouse_button_physically_down(),
+                &store.config,
+                &mut sim,
+                &mut was_in_head,
+            );
         }
 
         let mut trigger_open_designer = actions.open_designer;
@@ -544,7 +563,15 @@ fn main() {
             update_tray_status(&shell, &store.config, &sim);
         }
         if actions.open_context_menu {
-            let cmd = shell.show_context_menu(&store.config, sim.manual_privacy(), &store.user_profiles);
+            let monitors = enumerate_monitors();
+            let (_, cur_mon) = monitor_work_area_for_hwnd(overlay_hwnd);
+            let cmd = shell.show_context_menu(
+                &store.config,
+                sim.manual_privacy(),
+                &store.user_profiles,
+                &monitors,
+                &cur_mon,
+            );
             // Reset step timestamp after modal menu so spring physics never sees a modal `dt` spike!
             last_step_qpc = qpc_now();
             match cmd {
@@ -633,6 +660,74 @@ fn main() {
                 CMD_OPEN_CONFIG_DIR => {
                     let _ = Command::new("explorer.exe").arg(app_data_dir()).spawn();
                 }
+                CMD_SNAP_BR | CMD_SNAP_BL | CMD_SNAP_TR | CMD_SNAP_TL => {
+                    let (nx, ny) = match cmd {
+                        CMD_SNAP_BL => (0.04, 0.96),
+                        CMD_SNAP_TR => (0.96, 0.04),
+                        CMD_SNAP_TL => (0.04, 0.04),
+                        _ => (0.96, 0.96),
+                    };
+                    let (wa, mon) = monitor_work_area_for_hwnd(overlay_hwnd);
+                    store.config.anchor.monitor_device_name = mon;
+                    store.config.anchor.norm_x = nx;
+                    store.config.anchor.norm_y = ny;
+                    let (px, py) =
+                        anchor_to_work_area_pos(&store.config.anchor, cw as i32, ch as i32, wa);
+                    win_x = px;
+                    win_y = py;
+                    store.config.anchor.fallback_abs_x = win_x;
+                    store.config.anchor.fallback_abs_y = win_y;
+                    let _ = store.save_config();
+                    force_full_present = true;
+                    force_immediate_frame = true;
+                    sim.wake_active();
+                }
+                CMD_SCALE_MINI | CMD_SCALE_SMALL | CMD_SCALE_NORMAL | CMD_SCALE_LARGE => {
+                    store.config.scale = match cmd {
+                        CMD_SCALE_MINI => 0.6,
+                        CMD_SCALE_SMALL => 0.85,
+                        CMD_SCALE_LARGE => 1.5,
+                        _ => 1.0,
+                    };
+                    let (nw, nh) = compute_canvas_px(store.config.scale, dpi);
+                    if nw != cw || nh != ch {
+                        cw = nw;
+                        ch = nh;
+                        renderer.resize(cw, ch);
+                        let _ = surface.resize_if_needed(cw, ch);
+                    }
+                    let (wa, _) = monitor_work_area_for_hwnd(overlay_hwnd);
+                    let (px, py) =
+                        anchor_to_work_area_pos(&store.config.anchor, cw as i32, ch as i32, wa);
+                    win_x = px;
+                    win_y = py;
+                    store.config.anchor.fallback_abs_x = win_x;
+                    store.config.anchor.fallback_abs_y = win_y;
+                    let _ = store.save_config();
+                    force_full_present = true;
+                    force_immediate_frame = true;
+                    sim.wake_active();
+                }
+                c if (CMD_MONITOR_BASE..CMD_MONITOR_BASE + 16).contains(&c) => {
+                    let idx = (c - CMD_MONITOR_BASE) as usize;
+                    if let Some(m) = monitors.get(idx) {
+                        store.config.anchor.monitor_device_name = m.device_name.clone();
+                        let (px, py) = anchor_to_work_area_pos(
+                            &store.config.anchor,
+                            cw as i32,
+                            ch as i32,
+                            m.work_area,
+                        );
+                        win_x = px;
+                        win_y = py;
+                        store.config.anchor.fallback_abs_x = win_x;
+                        store.config.anchor.fallback_abs_y = win_y;
+                        let _ = store.save_config();
+                        force_full_present = true;
+                        force_immediate_frame = true;
+                        sim.wake_active();
+                    }
+                }
                 CMD_QUIT => {
                     GLOBAL_QUIT.store(true, Ordering::Release);
                     break;
@@ -715,6 +810,13 @@ fn main() {
                 ch = nh;
                 renderer.resize(cw, ch);
                 let _ = surface.resize_if_needed(cw, ch);
+                let (wa, _) = monitor_work_area_for_hwnd(overlay_hwnd);
+                let (px, py) =
+                    anchor_to_work_area_pos(&store.config.anchor, cw as i32, ch as i32, wa);
+                win_x = px;
+                win_y = py;
+                store.config.anchor.fallback_abs_x = win_x;
+                store.config.anchor.fallback_abs_y = win_y;
             }
             reconcile_autostart(store.config.auto_start);
             force_full_present = true;
@@ -845,6 +947,17 @@ fn main() {
                                 ch = nh;
                                 renderer.resize(cw, ch);
                                 let _ = surface.resize_if_needed(cw, ch);
+                                let (wa, _) = monitor_work_area_for_hwnd(overlay_hwnd);
+                                let (px, py) = anchor_to_work_area_pos(
+                                    &store.config.anchor,
+                                    cw as i32,
+                                    ch as i32,
+                                    wa,
+                                );
+                                win_x = px;
+                                win_y = py;
+                                store.config.anchor.fallback_abs_x = win_x;
+                                store.config.anchor.fallback_abs_y = win_y;
                             }
                             let _ = store.save_config();
                             GLOBAL_FG_DIRTY.store(true, Ordering::Release);
@@ -964,6 +1077,23 @@ fn main() {
                     drained.wheel_delta,
                     gaze,
                 );
+                // Event-driven localized head scratching when click-through lock is enabled
+                // (reuses Raw Input mouse-move wakeups; zero timers and 0 wakeups/sec in Parked0!)
+                if store.config.effective_click_through()
+                    && (drained.mouse_dx != 0 || drained.mouse_dy != 0)
+                {
+                    if let Some((lx, ly)) = cursor_in_overlay_px(overlay_hwnd) {
+                        eval_head_scratch(
+                            lx,
+                            ly,
+                            dpi,
+                            any_mouse_button_physically_down(),
+                            &store.config,
+                            &mut sim,
+                            &mut was_in_head,
+                        );
+                    }
+                }
             }
             // Stale-key UIPI safety fallback for keys held > 2.5 s when OS reports key no longer pressed
             if sim.has_any_key_held() && !any_common_key_physically_down() {
@@ -1104,7 +1234,13 @@ fn main() {
                 );
             }
         } else {
-            // Strict SeqCst lost-wakeup-free Park handshake!
+            // Strict SeqCst lost-wakeup-free Park handshake: reset the wake event BEFORE
+            // publishing `overlay_parked = true` so an input arriving after the store can never
+            // have its `SetEvent` cleared by `ResetEvent`.
+            unsafe {
+                let _ = CancelWaitableTimer(frame_timer);
+                let _ = ResetEvent(input_wake_ev);
+            }
             let seq_before = mailbox.input_seq.load(Ordering::SeqCst);
             mailbox.overlay_parked.store(true, Ordering::SeqCst);
             let seq_after = mailbox.input_seq.load(Ordering::SeqCst);
@@ -1113,8 +1249,6 @@ fn main() {
                 continue;
             }
             unsafe {
-                let _ = CancelWaitableTimer(frame_timer);
-                let _ = ResetEvent(input_wake_ev);
                 let _ = MsgWaitForMultipleObjectsEx(
                     Some(&wait_handles[1..]), // Exclude disarmed timer; 0 wakeups/sec!
                     windows::Win32::System::Threading::INFINITE,
@@ -1199,13 +1333,73 @@ fn compute_cursor_gaze(overlay_hwnd: HWND) -> Option<Vec2> {
         }
         let cx = (rc.left + rc.right) as f32 * 0.5;
         let cy = (rc.top + rc.bottom) as f32 * 0.36; // head center
-        let dx = pt.x as f32 - cx;
-        let dy = pt.y as f32 - cy;
-        // Soft bounded radial falloff so secondary-monitor cursor stays natural (never pegged harshly)
-        let gx = (dx / 420.0).tanh();
-        let gy = (dy / 340.0).tanh();
-        Some(Vec2::new(gx, gy))
+        let nx = (pt.x as f32 - cx) / 420.0;
+        let ny = (pt.y as f32 - cy) / 340.0;
+        // Radial tanh preserves true gaze angle on distant diagonal multi-monitor cursors
+        let r = (nx * nx + ny * ny).sqrt();
+        if r < 1e-4 {
+            Some(Vec2::default())
+        } else {
+            let scale = r.tanh() / r;
+            Some(Vec2::new(nx * scale, ny * scale))
+        }
     }
+}
+
+fn cursor_in_overlay_px(overlay_hwnd: HWND) -> Option<(f32, f32)> {
+    unsafe {
+        let mut pt = POINT::default();
+        if GetCursorPos(&mut pt).is_err() {
+            return None;
+        }
+        let mut rc = RECT::default();
+        if GetWindowRect(overlay_hwnd, &mut rc).is_err() {
+            return None;
+        }
+        Some(((pt.x - rc.left) as f32, (pt.y - rc.top) as f32))
+    }
+}
+
+fn any_mouse_button_physically_down() -> bool {
+    unsafe {
+        // VK_LBUTTON (0x01), VK_RBUTTON (0x02), VK_MBUTTON (0x04)
+        for vk in [0x01, 0x02, 0x04] {
+            if (GetAsyncKeyState(vk) as u16 & 0x8000) != 0 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn eval_head_scratch(
+    hx: f32,
+    hy: f32,
+    dpi: u32,
+    buttons_held: bool,
+    cfg: &pet_core::Config,
+    sim: &mut PetSim,
+    was_in_head: &mut bool,
+) {
+    let (inside, norm_u, norm_v) = HEAD_RECT_PX.with(|r| {
+        let rect = *r.borrow();
+        let rx = (rect.w * 0.5).max(1.0);
+        let ry = (rect.h * 0.5).max(1.0);
+        let cx = rect.x + rx;
+        let cy = rect.y + ry;
+        let pad = if *was_in_head { 10.0 } else { 0.0 };
+        let u = (hx - cx) / (rx + pad);
+        let v = (hy - cy) / (ry + pad);
+        // Elliptical head region avoids empty-air corner triggers above the ears
+        let inside = (u * u + v * v) <= 1.0;
+        let nu = ((hx - cx) / rx).clamp(-1.0, 1.0);
+        let nv = ((hy - cy) / ry).clamp(-1.0, 1.0);
+        (inside, nu, nv)
+    });
+    *was_in_head = inside;
+    let scale = 96.0 / dpi.max(96) as f32;
+    let pos_dip = Vec2::new(hx * scale, hy * scale);
+    let _ = sim.on_head_scratch(inside, norm_u, norm_v, pos_dip, buttons_held, cfg);
 }
 
 fn any_common_key_physically_down() -> bool {

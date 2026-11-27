@@ -384,7 +384,15 @@ fn process_raw_packet(raw: &RAWINPUT, mailbox: &InputMailbox) {
                 m.Anonymous.Anonymous.usButtonData as i16,
             )
         };
-        mailbox.push_mouse(m.lLastX, m.lLastY, btn_flags, btn_data);
+        // Guard against MOUSE_MOVE_ABSOLUTE (0x0001) from RDP/tablets whose 0..65535 coordinates
+        // would peg relative mouse_offset to +/-1.0.
+        const MOUSE_MOVE_ABSOLUTE_FLAG: u16 = 0x0001;
+        let (dx, dy) = if (m.usFlags.0 & MOUSE_MOVE_ABSOLUTE_FLAG) != 0 {
+            (0, 0)
+        } else {
+            (m.lLastX, m.lLastY)
+        };
+        mailbox.push_mouse(dx, dy, btn_flags, btn_data);
     }
 }
 

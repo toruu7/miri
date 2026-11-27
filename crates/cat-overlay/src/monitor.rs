@@ -1,14 +1,16 @@
-use pet_core::{fnv1a_64_lower, Config, GameHideScope, PrivacySource, RectI32};
+use pet_core::{fnv1a_64_lower, Config, GameHideScope, PrivacySource, RectI32, WindowAnchor};
 use std::ffi::c_void;
 use std::mem::size_of;
 use windows::core::PWSTR;
-use windows::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, GetLastError, HANDLE, HWND, RECT};
+use windows::Win32::Foundation::{
+    BOOL, CloseHandle, ERROR_ACCESS_DENIED, GetLastError, HANDLE, HWND, LPARAM, RECT,
+};
 use windows::Win32::Graphics::Dwm::{
     DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute,
 };
 use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, HMONITOR, MONITORINFO, MONITORINFOEXW, MONITOR_DEFAULTTONEAREST,
-    MonitorFromRect, MonitorFromWindow,
+    EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW,
+    MONITOR_DEFAULTTONEAREST, MonitorFromRect, MonitorFromWindow,
 };
 use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
 use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
@@ -56,6 +58,88 @@ pub struct ForegroundEvaluation {
     pub fullscreen_reason: &'static str,
     pub auto_privacy: PrivacySource,
     pub foreground_elevated_or_inaccessible: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct MonitorEntry {
+    pub device_name: String,
+    pub work_area: RectI32,
+    pub is_primary: bool,
+    pub width: i32,
+    pub height: i32,
+}
+
+unsafe extern "system" fn enum_mon_cb(
+    hmon: HMONITOR,
+    _hdc: HDC,
+    _rc: *mut RECT,
+    data: LPARAM,
+) -> BOOL {
+    let list = &mut *(data.0 as *mut Vec<MonitorEntry>);
+    let mut info = MONITORINFOEXW::default();
+    info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
+    if GetMonitorInfoW(hmon, &mut info as *mut MONITORINFOEXW as *mut MONITORINFO).as_bool() {
+        let rc = info.monitorInfo.rcWork;
+        let mr = info.monitorInfo.rcMonitor;
+        let len = info
+            .szDevice
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(info.szDevice.len());
+        let device_name = String::from_utf16_lossy(&info.szDevice[..len]);
+        let is_primary = (info.monitorInfo.dwFlags & 1) != 0; // MONITORINFOF_PRIMARY
+        list.push(MonitorEntry {
+            device_name,
+            work_area: RectI32 {
+                left: rc.left,
+                top: rc.top,
+                right: rc.right,
+                bottom: rc.bottom,
+            },
+            is_primary,
+            width: (mr.right - mr.left).max(1),
+            height: (mr.bottom - mr.top).max(1),
+        });
+    }
+    BOOL(1)
+}
+
+/// Enumerate all connected monitors using Win32 GDI (zero extra DLLs).
+pub fn enumerate_monitors() -> Vec<MonitorEntry> {
+    let mut list: Vec<MonitorEntry> = Vec::new();
+    unsafe {
+        let _ = EnumDisplayMonitors(
+            HDC::default(),
+            None,
+            Some(enum_mon_cb),
+            LPARAM(&mut list as *mut Vec<MonitorEntry> as isize),
+        );
+    }
+    // Primary monitor first, then sorted by left edge for predictable tray numbering
+    list.sort_by(|a, b| {
+        b.is_primary
+            .cmp(&a.is_primary)
+            .then_with(|| a.work_area.left.cmp(&b.work_area.left))
+    });
+    list
+}
+
+/// Resolve monitor work area honoring `anchor.monitor_device_name` first, falling back to
+/// `fallback_abs_x/y` if that display is no longer connected.
+pub fn monitor_work_area_for_anchor(anchor: &WindowAnchor, cw: i32, ch: i32) -> (RectI32, String) {
+    if !anchor.monitor_device_name.is_empty() {
+        for m in enumerate_monitors() {
+            if m.device_name.eq_ignore_ascii_case(&anchor.monitor_device_name) {
+                return (m.work_area, m.device_name);
+            }
+        }
+    }
+    monitor_work_area_for_rect(RectI32 {
+        left: anchor.fallback_abs_x,
+        top: anchor.fallback_abs_y,
+        right: anchor.fallback_abs_x + cw,
+        bottom: anchor.fallback_abs_y + ch,
+    })
 }
 
 pub fn monitor_work_area_for_hwnd(hwnd: HWND) -> (RectI32, String) {
